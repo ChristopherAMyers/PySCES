@@ -3,7 +3,7 @@ from numpy.linalg import norm
 from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
-from pysces.qcRunners.TeraChem import TCRunner, TCJob
+from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch
 import pickle
 import os
 from copy import deepcopy
@@ -179,14 +179,22 @@ class AdiabaticStates():
         for x in (self.dH, self.NACs, self.eigen_val_gradients, self.eigen_vec_gradients):
             x = np.zeros(x.shape)
 
+        new_dH = np.zeros_like(self.dH)
+        new_NACs = np.zeros_like(self.NACs)
+        new_eigen_val_gradients = np.zeros_like(self.eigen_val_gradients)
+        new_eigen_vec_gradients = np.zeros_like(self.eigen_vec_gradients)
         for i in range(0, n_states, 2):
-            self.dH[:,:,i//2] = (states[i+1].hamiltonian - states[i+0].hamiltonian)/(2*dx)
-            self.eigen_val_gradients[:, i//2] =    (states[i+1].eigen_vals - states[i+0].eigen_vals)/(2*dx)
-            self.eigen_vec_gradients[:, :, i//2] = (states[i+1].eigen_vecs - states[i+0].eigen_vecs)/(2*dx)
+            new_dH[:,:,i//2] = (states[i+1].hamiltonian - states[i+0].hamiltonian)/(2*dx)
+            new_eigen_val_gradients[:, i//2] =    (states[i+1].eigen_vals - states[i+0].eigen_vals)/(2*dx)
+            new_eigen_vec_gradients[:, :, i//2] = (states[i+1].eigen_vecs - states[i+0].eigen_vecs)/(2*dx)
             
             basis_overlap_n = self.overlap_matrix(states[i+0], sub_basis_overlaps[i+0])
             basis_overlap_p = self.overlap_matrix(states[i+1], sub_basis_overlaps[i+1])
-            self.NACs[:, :, i//2] = (basis_overlap_p - basis_overlap_n)/(2*dx)
+            new_NACs[:, :, i//2] = (basis_overlap_p - basis_overlap_n)/(2*dx)
+        self.dH = new_dH
+        self.NACs = new_NACs
+        self.eigen_val_gradients = new_eigen_val_gradients
+        self.eigen_vec_gradients = new_eigen_vec_gradients
 
 class CoupledMolecule(AdiabaticStates):
 
@@ -213,7 +221,7 @@ class CoupledMolecule(AdiabaticStates):
 
         #   molecular properties
         self.mol_energies = np.zeros(self._n_elec)
-        self.mol_gradients = np.zeros((self._n_elec, self.n_nuclei*3))
+        self.mol_gradients = np.zeros((self._n_elec, self.n_nuclei*3)) 
         self.mol_NACs = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3))
         self.mol_dipole_matrix = np.zeros((self._n_elec, self._n_elec, 3))
         self.mol_dipole_matrix_gradient = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3, 3))
@@ -230,7 +238,18 @@ class CoupledMolecule(AdiabaticStates):
         basis_NACs = self.get_basis_NACs(mol_basis_NACs)
         return super().NA_coupling(basis_NACs)
 
-    def set_hamiltonian(self, energies, dipoles):
+    def set_hamiltonian(self, energies, dipole_matrix):
+        '''
+            Evaluate the Hamiltonian elements
+
+            Parameters
+            ----------
+            energies: np.ndarray
+                diagonal components of the hamiltonian
+            dipole_matrix: np.ndarray (n_states x n_states)
+                Dipole matrix with diagonal elemnts being the dipoles of each
+                state and the off-diagonal elements being the transition dipoles
+        '''
         n_elec = self._n_elec
 
         mu_dot_field = np.zeros((n_elec, n_elec))
@@ -238,11 +257,11 @@ class CoupledMolecule(AdiabaticStates):
             norm_field_dir = self._field_dir / np.linalg.norm(self._field_dir)
             for a in range(n_elec):
                 for b in range(n_elec):
-                    mu_dot_field[a, b] = np.dot(dipoles[a, b], self._field_dir)
+                    mu_dot_field[a, b] = np.dot(dipole_matrix[a, b], self._field_dir)
         else:
             for a in range(n_elec):
                 for b in range(n_elec):
-                    mu_dot_field[a, b] = np.linalg.norm(dipoles[a, b])
+                    mu_dot_field[a, b] = np.linalg.norm(dipole_matrix[a, b])
                     
         dipole_self = np.zeros((n_elec, n_elec))
         for a in range(n_elec):
@@ -265,7 +284,7 @@ class CoupledMolecule(AdiabaticStates):
                 H_t[i, j] = H_en + H_p + H_en_p + H_d
 
         self.mol_energies = energies
-        self.mol_dipole_matrix = dipoles
+        self.mol_dipole_matrix = dipole_matrix
         self.hamiltonian = H_t
         return H_t
     
@@ -328,7 +347,7 @@ class CoupledMolecule(AdiabaticStates):
                     dH[i, j, nuc] = dH_en + dH_p + dH_en_p + dH_d
 
         self.mol_gradients = gradients
-        self.mol_dipole_matrix_gradient = dipole_self_grad
+        self.mol_dipole_matrix_gradient = dipole_grads
         self.dH = dH
         return dH
     
@@ -407,22 +426,58 @@ class TCPolaritonRunner(TCRunner):
 
         self.coupled_mol = coupled_mol
 
+        self._spec_job_opts['gradient_0'] = {'dipolederivative': 'yes'}
+        self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
+
+        self._prev_evecs = None
+        self._prev_ref_job = None
+
     def run_new_geom(self, geom):
-        
+        mol = self.coupled_mol
+    
+        #   Run TeraChem
         if not TeraChem._DEBUG:
-            job_result, timings = self.run_TC_new_geom(geom)
+            job_batch = self.run_TC_new_geom(geom)
         else:
             if not os.path.isfile('_ref_jobs.pkl'):
-                job_result, timings = self.run_TC_new_geom(geom)
-                with open('_ref_jobs.pkl', 'wb') as file: pickle.dump(self._prev_jobs, file)
+                job_batch = self.run_TC_new_geom(geom)
+                with open('_ref_jobs.pkl', 'wb') as file: 
+                    pickle.dump(job_batch, file)
             else:
-                with open('_ref_jobs.pkl', 'rb') as file: self._prev_jobs = pickle.load(file)
+                with open('_ref_jobs.pkl', 'rb') as file:
+                    job_batch = pickle.load(file)
+                    self._prev_jobs = job_batch.jobs
+        job_batch: TCJobBatch
 
-        #   update jobs form tc.out file too
+        #   update jobs form tc.out file, and correct with esp charges
         for job in self._prev_jobs:
             self._update_job_from_tcout(job)
+            if job.state == 0:
+                continue
+            if self._prev_ref_job is None:
+                self._prev_ref_job = job
+            print("REF JOB: ", self._prev_ref_job)
+            TeraChem._correct_signs_from_charges(job, self._prev_ref_job)
 
-    def run_numerical_derivatives(self, mol_geom: np.ndarray, dx=0.01, run_overlaps=True, overlaps=None):
+
+        mol.mol_energies, mol.mol_gradients, mol.mol_NACs, _ = TeraChem.format_output_LSCIVR(job_batch.results_list)
+        # return
+
+        #   dipole and other gradients
+        for job in self._prev_jobs:
+            print(job)
+            if job.name == 'gradient_1':
+                mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
+        mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(job_batch.jobs)
+
+        hamiltonian = mol.set_hamiltonian(mol.mol_energies, mol.mol_dipole_matrix)
+        dH = mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
+        pol_evals, pol_evecs = mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
+        pol_NACs = mol.NA_coupling(mol.mol_NACs)
+        self._prev_evecs = pol_evecs
+        
+
+    def run_numerical_derivatives(self, mol_geom: np.ndarray, dx=0.01, run_overlaps=True, overlaps=None, set_dipoles=True):
         '''
             Parameters
             ----------
@@ -437,7 +492,8 @@ class TCPolaritonRunner(TCRunner):
         #   run the reference set of jobs
         mol = self.coupled_mol
         self.run_new_geom(mol_geom)
-        ref_job: TCJob = self._prev_jobs[-1]
+        # ref_job: TCJob = self._prev_jobs[-1]
+        ref_job: TCJob = self._prev_jobs[1]
         self._update_job_from_tcout(ref_job)
         ref_energies, grads, nacs, trans_dips = TeraChem.format_output_LSCIVR([x.results for x in self._prev_jobs])
 
@@ -573,12 +629,60 @@ class TCPolaritonRunner(TCRunner):
         n_states = len(job_results['energy'])
         dipole_matrix = np.zeros((n_states, n_states, 3))
         dipole_matrix[0, 0] = np.array(job_results['dipole_vector'])*DEBYE_2_AU
-        for i in range(n_states):
+        for i in range(1, n_states):
             dipole_matrix[i, i] = job_results[dipole_key][i-1]
-        indicies = np.transpose(np.tril_indices(n_states-1))
+        indicies = np.transpose(np.tril_indices(n_states, k=-1))
         for count, (i, j) in enumerate(indicies):
-            dipole_matrix[i+1, j+1] = job_results[tr_dipole_key][count]
-            dipole_matrix[j+1, i+1] = job_results[tr_dipole_key][count]
+            dipole_matrix[i, j] = job_results[tr_dipole_key][count]
+            dipole_matrix[j, i] = job_results[tr_dipole_key][count]
 
         return dipole_matrix
+    
+
+    def dipole_matrix_gradient_from_jobs(self, tc_jobs: list[TCJob]):
+        '''
+            re-order and combine all of the the dipole derivatives from a list of 
+            TC jobs into a single matrix.
+        '''
+        dipole_grads = np.zeros_like(self.coupled_mol.mol_dipole_matrix_gradient)
+        n_states = self.coupled_mol._n_elec
+        got_gs, got_ex, got_tr = False, False, False
+        for tc_job in tc_jobs:
+
+            if 'cis_transition_dipole_deriv' in tc_job.results:
+                derivs = np.array(tc_job.results['cis_transition_dipole_deriv'])
+                #   swap second and 4th axis. The last axis is now mX,mY,mZ
+                #   then, flatten the middle two axis, which are the cartesian coordinates
+                derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_states, -1, 3)
+
+                indicies = np.transpose(np.tril_indices(n_states, k=-1))
+                for count, (i, j) in enumerate(indicies):
+                    dipole_grads[i, j] = derivs[count]
+                    dipole_grads[j, i] = derivs[count]
+                got_tr = True
+
+            if 'cis_dipole_deriv' in tc_job.results:
+                # for line in tc_job.results['tc.out']:
+                #     print(line)
+                derivs = np.array(tc_job.results['cis_dipole_deriv'])
+                derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_states-1, -1, 3)
+                for i in range(1, n_states):
+                    dipole_grads[i, i] = derivs[i-1]
+                got_ex = True
+
+            if 'dipole_deriv' in tc_job.results:
+                derivs = np.array(tc_job.results['dipole_deriv'])
+                print(f'{derivs.shape=} {dipole_grads.shape=}')
+                derivs = derivs.transpose((1, 2, 0)).reshape(-1, 3)
+                dipole_grads[0, 0] = derivs
+                got_gs = True
+
+        if not got_gs:
+            raise ValueError('Could not recover ground state dipole moment derivatives from TC jobs')
+        if not got_ex:
+            raise ValueError('Could not recover excited state dipole moment derivatives from TC jobs')
+        if not got_tr:
+            raise ValueError('Could not recover transition state dipole moment derivatives from TC jobs')
+
+        return dipole_grads
 

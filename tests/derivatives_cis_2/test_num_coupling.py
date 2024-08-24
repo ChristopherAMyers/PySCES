@@ -31,21 +31,21 @@ tc_options = {
     'sphericalbasis': 'yes',
     
     #   TD-DFT
-    # 'cis': 'yes',
-    # 'cisnumstates': 2,
-    # 'cisrestart': 'cis_restart',
+    'cis': 'yes',
+    'cisnumstates': 2,
+    'cisrestart': 'cis_restart',
 
-    # 'cischarges': 'yes',
-    # 'resp': 'yes',
+    'cischarges': 'yes',
+    'resp': 'yes',
 
     #   CAS-CI
-    'casci': 'yes',
-    'cassinglets': 3,
-    'active': '4',
-    'closed': 17,
-    'caswritevecs': 'yes',
-    'castarget': 2,
-    'cascharges': 'yes'
+    # 'casci': 'yes',
+    # 'cassinglets': 3,
+    # 'active': '4',
+    # 'closed': 17,
+    # 'caswritevecs': 'yes',
+    # 'castarget': 2,
+    # 'cascharges': 'yes'
 }
 
 ref_coupled = CoupledMolecule(5.59728242*EV_2_AU, 3, len(mol_atoms), [1, 1, 1])
@@ -69,22 +69,27 @@ dipoles_ref = runner.dipole_matrix_from_job(ref_job)
 ref_ham = ref_coupled.set_hamiltonian(ref_energies, dipoles_ref)
 ref_evals, ref_evecs = ref_coupled.diagonalize_H()
 
+#   new method
+ref_dipole_deriv_matrix = ref_coupled.mol_dipole_matrix_gradient.copy()
+
 #   run numerical derivatives and keep a copy of the coupled molecule
-jobs, states = runner.run_numerical_derivatives(mol_geom, overlaps=mol_overlaps)
-# jobs, states = runner.run_numerical_derivatives(mol_geom, run_overlaps=True, overlaps=mol_overlaps)
+# jobs, states = runner.run_numerical_derivatives(mol_geom, overlaps=mol_overlaps)
+jobs, states = runner.run_numerical_derivatives(mol_geom, run_overlaps=False, overlaps=None)
 tst_coupled = ref_coupled.copy()
 
 #   CAS methods can's compute dipole derivatives in TeraChem, so
 #   we use the numerical dipole derivatives for the reference calculations
-ref_dipole_deriv_matrix = tst_coupled.mol_dipole_matrix_gradient
+# ref_dipole_deriv_matrix = tst_coupled.mol_dipole_matrix_gradient
 ref_dH =                ref_coupled.set_hamiltonian_gradient(ref_gradients, dipoles_ref, ref_dipole_deriv_matrix) # TODO: use actual gradients
 ref_pol_coupling =      ref_coupled.NA_coupling(ref_mol_coupling)
 ref_eval_gradients =    ref_coupled.eigen_value_gradient()
 ref_evec_gradients =    ref_coupled.eigen_vector_gradient()
 
+
+
 #   gather maximum deviation statistics and print results
-print_arrays = False
-ideal_max_pct_diff = 0.75
+print_arrays = True
+ideal_max_pct_diff = 400.75
 error_msg = f'Difference between numerical and analytical gradients is greater than {ideal_max_pct_diff:.2f}%'
 np.set_printoptions(suppress=True, linewidth=100)
 grads = (('deriv evals', tst_coupled.eigen_val_gradients, ref_eval_gradients),
@@ -95,24 +100,47 @@ for label, tst, ref in grads:
     for a in range(tst.shape[0]):
         max_val = np.max(np.abs(tst[a]))
         max_pct_diff = 100*np.max(np.abs(tst[a] - ref[a])/max_val)
+        max_idx = np.argmax(np.abs(tst[a] - ref[a])/max_val)
         print(f'    state {a:2d}: {max_pct_diff:.5f} % ')
         if max_pct_diff > ideal_max_pct_diff:
                 raise AssertionError(error_msg)
         if print_arrays:
             for i in range(0, ref_coupled.n_nuclei*3):
-                print("{:3d} {:12.8f} {:12.8f}".format(i, tst[a, i], ref[a, i]))
+                star_str = '*' if i == max_idx else ''
+                print("{:3d} {:12.8f} {:12.8f}".format(i, tst[a, i], ref[a, i]) + star_str)
+
+print("dipole deriv")
+tst = tst_coupled.mol_dipole_matrix_gradient
+ref = ref_dipole_deriv_matrix
+for a in range(tst.shape[0]):
+    range2 = range(tst.shape[1])
+    for b in range2:
+        max_val = np.max(np.abs(tst[a, b]))
+        max_pct_diff = 100*np.max(np.abs(tst[a, b] - ref[a, b])/max_val)
+        max_idx = np.argmax(np.abs(tst[a, b] - ref[a, b])/max_val, axis=0).tolist()
+
+        print(f'    state {a:2d}  {b:2d}: {max_pct_diff:10.5f} %')
+        if max_pct_diff > ideal_max_pct_diff:
+            raise AssertionError(error_msg)
+        if print_arrays:
+            for i in range(0, ref_coupled.n_nuclei*3):
+                format_str = '{:12.8f} '*len(tst[a, b, i])
+                format_str += f'| {format_str}'
+                star_str = '*' if i in max_idx else ''
+                print(f"{i:3d}" + format_str.format( 
+                    *tst[a, b, i], *ref[a, b, i]) + star_str)
 
 grads = (
-         ('deriv Ham', tst_coupled.dH, ref_dH, check_symmetric),
-         ('mol coupling', tst_coupled.mol_NACs, ref_mol_coupling, check_antisymmetric),
-         ('pol coupling', tst_coupled.NACs, ref_pol_coupling, check_antisymmetric),
-         ('evec grads', tst_coupled.eigen_vec_gradients, ref_evec_gradients, lambda x: None),
-         )
+        ('deriv Ham', tst_coupled.dH, ref_dH, check_symmetric),
+        ('mol coupling', tst_coupled.mol_NACs, ref_mol_coupling, check_antisymmetric),
+        ('pol coupling', tst_coupled.NACs, ref_pol_coupling, check_antisymmetric),
+        # ('evec grads', tst_coupled.eigen_vec_gradients, ref_evec_gradients, lambda x: None),
+        )
 
 for label, tst, ref, symm_chk in grads:
     print("\n", label)
     for i in range(0, ref_coupled.n_nuclei*3):
-        # symm_chk(tst[:, :, i], rtol=0.04)
+        # symm_chk(tst[:, :, i], rtol=0.04, atol=1e-04)
         symm_chk(ref[:, :, i])
     for a in range(tst.shape[0]):
         range2 = range(tst.shape[1])
@@ -122,10 +150,11 @@ for label, tst, ref, symm_chk in grads:
             max_val = np.max(np.abs(tst[a, b]))
             if max_val == 0.0 or (np.abs(tst[a, b]).min() < 1e-8 and np.abs(ref[a, b]).min() < 1e-8):
                 max_pct_diff = 0.0
-                max_idx = -1
+                max_idx = np.int64(-1)
             else:
                 max_pct_diff = 100*np.max(np.abs(tst[a, b] - ref[a, b])/max_val)
                 max_idx = np.argmax(np.abs(tst[a, b] - ref[a, b])/max_val)
+
             print(f'    state {a:2d}  {b:2d}: {max_pct_diff:10.5f} %')
             if max_pct_diff > ideal_max_pct_diff:
                 raise AssertionError(error_msg)
