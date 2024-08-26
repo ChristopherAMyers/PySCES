@@ -18,3 +18,5 @@ tests/derivatives_cas/tmp
 tests/derivatives_cis/test_num_coupling.orig.py
 tests/derivatives_cis/tmp
 tests/*/logs*
+
+debug/

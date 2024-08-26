@@ -4,6 +4,7 @@ from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
 from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch
+from . import NumDeriv as numD
 import pickle
 import os
 from copy import deepcopy
@@ -166,7 +167,7 @@ class AdiabaticStates():
 
         return overlap
     
-    def numerical_gradients(self, states: list['AdiabaticStates'], sub_basis_overlaps: list[np.ndarray], dx=0.01):
+    def numerical_gradients(self, states: list['AdiabaticStates'], sub_basis_overlaps: list[np.ndarray], n_points=3, dx=0.01):
         n_states = len(states)
         
         
@@ -179,22 +180,13 @@ class AdiabaticStates():
         for x in (self.dH, self.NACs, self.eigen_val_gradients, self.eigen_vec_gradients):
             x = np.zeros(x.shape)
 
-        new_dH = np.zeros_like(self.dH)
-        new_NACs = np.zeros_like(self.NACs)
-        new_eigen_val_gradients = np.zeros_like(self.eigen_val_gradients)
-        new_eigen_vec_gradients = np.zeros_like(self.eigen_vec_gradients)
-        for i in range(0, n_states, 2):
-            new_dH[:,:,i//2] = (states[i+1].hamiltonian - states[i+0].hamiltonian)/(2*dx)
-            new_eigen_val_gradients[:, i//2] =    (states[i+1].eigen_vals - states[i+0].eigen_vals)/(2*dx)
-            new_eigen_vec_gradients[:, :, i//2] = (states[i+1].eigen_vecs - states[i+0].eigen_vecs)/(2*dx)
-            
-            basis_overlap_n = self.overlap_matrix(states[i+0], sub_basis_overlaps[i+0])
-            basis_overlap_p = self.overlap_matrix(states[i+1], sub_basis_overlaps[i+1])
-            new_NACs[:, :, i//2] = (basis_overlap_p - basis_overlap_n)/(2*dx)
-        self.dH = new_dH
-        self.NACs = new_NACs
-        self.eigen_val_gradients = new_eigen_val_gradients
-        self.eigen_vec_gradients = new_eigen_vec_gradients
+        self.dH = numD.compute([s.hamiltonian for s in states], n_points, dx, (1, 2, 0))
+        self.eigen_val_gradients = numD.compute([s.eigen_vals for s in states], n_points, dx).T
+        self.eigen_vec_gradients = numD.compute([s.eigen_vecs for s in states], n_points, dx, (1, 2, 0))
+        basis_overlaps = [self.overlap_matrix(states[i], sub_basis_overlaps[i]) for i in range(n_states)]
+        self.NACs = numD.compute(basis_overlaps, n_points, dx, (1, 2, 0))
+        for i in range(self.n_nuclei*3):
+            np.fill_diagonal(self.NACs[:, :, i], 0.0)
 
 class CoupledMolecule(AdiabaticStates):
 
@@ -456,9 +448,7 @@ class TCPolaritonRunner(TCRunner):
                 continue
             if self._prev_ref_job is None:
                 self._prev_ref_job = job
-            print("REF JOB: ", self._prev_ref_job)
             TeraChem._correct_signs_from_charges(job, self._prev_ref_job)
-
 
         mol.mol_energies, mol.mol_gradients, mol.mol_NACs, _ = TeraChem.format_output_LSCIVR(job_batch.results_list)
         # return
@@ -477,7 +467,7 @@ class TCPolaritonRunner(TCRunner):
         self._prev_evecs = pol_evecs
         
 
-    def run_numerical_derivatives(self, mol_geom: np.ndarray, dx=0.01, run_overlaps=True, overlaps=None, set_dipoles=True):
+    def run_numerical_derivatives(self, mol_geom: np.ndarray, n_points=3, dx=0.01, run_overlaps=True, overlaps=None, set_dipoles=True):
         '''
             Parameters
             ----------
@@ -499,7 +489,7 @@ class TCPolaritonRunner(TCRunner):
 
 
         #   run all of the numerical derivative jobs
-        jobs = super()._run_numerical_derivatives(ref_job, dx, run_overlaps)
+        jobs = super()._run_numerical_derivatives(ref_job, n_points, dx, run_overlaps)
         num_deriv_jobs: list[TCJob] = jobs['num_deriv_jobs']
         overlap_jobs: list[TCJob] = jobs['overlap_jobs']
 
@@ -549,13 +539,14 @@ class TCPolaritonRunner(TCRunner):
         elif ref_job.excited_type == 'cis' or not run_overlaps:
             #   cis jobs can't compute overlaps in TeraChem, so we approximate them with the NAC
             print("CIS APPROXIMATION: ", len(num_deriv_jobs))
-            for i in range(0, len(num_deriv_jobs), 2):
-                overlap_matrix_p = nacs[:, :, i//2]*dx
-                overlap_matrix_n = -nacs[:, :, i//2]*dx
-                np.fill_diagonal(overlap_matrix_p, 1.0)
-                np.fill_diagonal(overlap_matrix_n, 1.0)
-                sub_basis_overlaps.append(overlap_matrix_n)
-                sub_basis_overlaps.append(overlap_matrix_p)
+
+            for i in range(0, len(num_deriv_jobs), n_points-1):
+                shift_multiples = (np.arange(n_points) - n_points//2).tolist()
+                shift_multiples.pop(n_points//2)
+                for j in shift_multiples:
+                    overlap_matrix = nacs[:, :, i//(n_points-1)]*dx*j
+                    np.fill_diagonal(overlap_matrix, 1.0)
+                    sub_basis_overlaps.append(overlap_matrix)
 
                 # print("COMPARE: ")
                 # print(overlaps[i])
@@ -567,19 +558,17 @@ class TCPolaritonRunner(TCRunner):
 
         sub_basis_overlaps = np.array(sub_basis_overlaps)
 
-        #   dipole matrix and other gradients
+        #   molecule properties and gradients
+        mol.mol_gradients = numD.compute(all_energies, n_points, dx).T
+        mol.mol_dipole_matrix_gradient = numD.compute(all_dipoles, n_points, dx, (1, 2, 0, 3))
+        mol.mol_NACs = numD.compute(sub_basis_overlaps, n_points, dx, (1, 2, 0))
         mol.mol_dipole_matrix = self.dipole_matrix_from_job(ref_job)
-        for i in range(0, len(num_deriv_jobs), 2):
-            mol.mol_dipole_matrix_gradient[:, :, i//2] = (all_dipoles[i+1] - all_dipoles[i])/(2*dx)
-            mol.mol_gradients[:, i//2] = (all_energies[i+1] - all_energies[i])/(2*dx)
-            mol.mol_NACs[:, :, i//2] = (sub_basis_overlaps[i+1] - sub_basis_overlaps[i])/(2*dx)
-            np.fill_diagonal(mol.mol_NACs[:, :, i//2], 0)
         
         #   polariton overlaps
         pol_overlaps = [mol.get_basis_overlaps(x) for x in sub_basis_overlaps]
 
-        mol.numerical_gradients(states, pol_overlaps, dx)
-        
+        mol.numerical_gradients(states, pol_overlaps, n_points, dx)
+        print(f'{mol.NACs[:, :, 0]}')
 
         return jobs, states
 

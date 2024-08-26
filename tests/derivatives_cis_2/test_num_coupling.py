@@ -27,13 +27,16 @@ tc_options = {
     'closed_shell': True,
     'restricted': True,
     'precision': 'mixed',
-    'convthre': 1E-6,
+    'convthre': 1E-8,
     'sphericalbasis': 'yes',
+    'precision': 'double',
+    'threall': 1e-20,
     
     #   TD-DFT
     'cis': 'yes',
     'cisnumstates': 2,
     'cisrestart': 'cis_restart',
+    'cisconvtol': 1e-8,
 
     'cischarges': 'yes',
     'resp': 'yes',
@@ -68,27 +71,20 @@ mol_overlaps = np.array([num_overlap_data[str(i+1)]['ci_overlap'] for i in range
 dipoles_ref = runner.dipole_matrix_from_job(ref_job)
 ref_ham = ref_coupled.set_hamiltonian(ref_energies, dipoles_ref)
 ref_evals, ref_evecs = ref_coupled.diagonalize_H()
-
-#   new method
 ref_dipole_deriv_matrix = ref_coupled.mol_dipole_matrix_gradient.copy()
-
-#   run numerical derivatives and keep a copy of the coupled molecule
-# jobs, states = runner.run_numerical_derivatives(mol_geom, overlaps=mol_overlaps)
-jobs, states = runner.run_numerical_derivatives(mol_geom, run_overlaps=False, overlaps=None)
-tst_coupled = ref_coupled.copy()
-
-#   CAS methods can's compute dipole derivatives in TeraChem, so
-#   we use the numerical dipole derivatives for the reference calculations
-# ref_dipole_deriv_matrix = tst_coupled.mol_dipole_matrix_gradient
 ref_dH =                ref_coupled.set_hamiltonian_gradient(ref_gradients, dipoles_ref, ref_dipole_deriv_matrix) # TODO: use actual gradients
 ref_pol_coupling =      ref_coupled.NA_coupling(ref_mol_coupling)
 ref_eval_gradients =    ref_coupled.eigen_value_gradient()
 ref_evec_gradients =    ref_coupled.eigen_vector_gradient()
 
+#   run numerical derivatives and keep a copy of the coupled molecule
+# jobs, states = runner.run_numerical_derivatives(mol_geom, overlaps=mol_overlaps)
+jobs, states = runner.run_numerical_derivatives(mol_geom, run_overlaps=False, overlaps=None, n_points=3, dx=0.005)
+tst_coupled = ref_coupled.copy()
 
 
 #   gather maximum deviation statistics and print results
-print_arrays = True
+print_arrays = False
 ideal_max_pct_diff = 400.75
 error_msg = f'Difference between numerical and analytical gradients is greater than {ideal_max_pct_diff:.2f}%'
 np.set_printoptions(suppress=True, linewidth=100)
