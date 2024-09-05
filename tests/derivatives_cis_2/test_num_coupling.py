@@ -40,15 +40,6 @@ tc_options = {
 
     'cischarges': 'yes',
     'resp': 'yes',
-
-    #   CAS-CI
-    # 'casci': 'yes',
-    # 'cassinglets': 3,
-    # 'active': '4',
-    # 'closed': 17,
-    # 'caswritevecs': 'yes',
-    # 'castarget': 2,
-    # 'cascharges': 'yes'
 }
 
 ref_coupled = CoupledMolecule(5.59728242*EV_2_AU, 3, len(mol_atoms), [1, 1, 1])
@@ -61,26 +52,17 @@ runner._server_root_list = ['/home/cmyers7/data/TC_servers']
 result = runner.run_new_geom(mol_geom)
 
 ref_job = runner._prev_jobs[1]
-ref_energies, ref_gradients, ref_mol_coupling, _ = format_output_LSCIVR([x.results for x in runner._prev_jobs])
+all_energies, ref_energies, ref_gradients, ref_mol_coupling, _ = format_output_LSCIVR([x.results for x in runner._prev_jobs])
 
 #   import job that has the correct overlap matrices
 num_overlap_data = json.load(open('num_coupling.json'))
 mol_overlaps = np.array([num_overlap_data[str(i+1)]['ci_overlap'] for i in range(len(num_overlap_data) - 1)])
 
-#   diagonalize reference job
-dipoles_ref = runner.dipole_matrix_from_job(ref_job)
-ref_ham = ref_coupled.set_hamiltonian(ref_energies, dipoles_ref)
-ref_evals, ref_evecs = ref_coupled.diagonalize_H()
-ref_dipole_deriv_matrix = ref_coupled.mol_dipole_matrix_gradient.copy()
-ref_dH =                ref_coupled.set_hamiltonian_gradient(ref_gradients, dipoles_ref, ref_dipole_deriv_matrix) # TODO: use actual gradients
-ref_pol_coupling =      ref_coupled.NA_coupling(ref_mol_coupling)
-ref_eval_gradients =    ref_coupled.eigen_value_gradient()
-ref_evec_gradients =    ref_coupled.eigen_vector_gradient()
-
 #   run numerical derivatives and keep a copy of the coupled molecule
 # jobs, states = runner.run_numerical_derivatives(mol_geom, overlaps=mol_overlaps)
+ref_coupled = runner.coupled_mol.copy()
 jobs, states = runner.run_numerical_derivatives(mol_geom, run_overlaps=False, overlaps=None, n_points=3, dx=0.005)
-tst_coupled = ref_coupled.copy()
+tst_coupled = runner.coupled_mol.copy()
 
 
 #   gather maximum deviation statistics and print results
@@ -88,8 +70,8 @@ print_arrays = False
 ideal_max_pct_diff = 400.75
 error_msg = f'Difference between numerical and analytical gradients is greater than {ideal_max_pct_diff:.2f}%'
 np.set_printoptions(suppress=True, linewidth=100)
-grads = (('deriv evals', tst_coupled.eigen_val_gradients, ref_eval_gradients),
-         ('mol gradients', tst_coupled.mol_gradients, ref_gradients),
+grads = (('deriv evals', tst_coupled.eigen_val_gradients, ref_coupled.eigen_val_gradients),
+         ('mol gradients', tst_coupled.mol_gradients, ref_coupled.mol_gradients),
          )
 for label, tst, ref in grads:
     print("\n", label)
@@ -107,7 +89,7 @@ for label, tst, ref in grads:
 
 print("dipole deriv")
 tst = tst_coupled.mol_dipole_matrix_gradient
-ref = ref_dipole_deriv_matrix
+ref = ref_coupled.mol_dipole_matrix_gradient
 for a in range(tst.shape[0]):
     range2 = range(tst.shape[1])
     for b in range2:
@@ -127,10 +109,10 @@ for a in range(tst.shape[0]):
                     *tst[a, b, i], *ref[a, b, i]) + star_str)
 
 grads = (
-        ('deriv Ham', tst_coupled.dH, ref_dH, check_symmetric),
-        ('mol coupling', tst_coupled.mol_NACs, ref_mol_coupling, check_antisymmetric),
-        ('pol coupling', tst_coupled.NACs, ref_pol_coupling, check_antisymmetric),
-        # ('evec grads', tst_coupled.eigen_vec_gradients, ref_evec_gradients, lambda x: None),
+        ('deriv Ham', tst_coupled.dH, ref_coupled.dH, check_symmetric),
+        ('evec grads', tst_coupled.eigen_vec_gradients, ref_coupled.eigen_vec_gradients, lambda x: None),
+        ('mol coupling', tst_coupled.mol_NACs, ref_coupled.mol_NACs, check_antisymmetric),
+        ('pol coupling', tst_coupled.NACs, ref_coupled.NACs, check_antisymmetric),
         )
 
 for label, tst, ref, symm_chk in grads:

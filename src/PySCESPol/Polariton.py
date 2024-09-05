@@ -443,6 +443,7 @@ class TCPolaritonRunner(TCRunner):
 
         #   update jobs form tc.out file, and correct with esp charges
         for job in self._prev_jobs:
+            # print(job)
             self._update_job_from_tcout(job)
             if job.state == 0:
                 continue
@@ -450,21 +451,22 @@ class TCPolaritonRunner(TCRunner):
                 self._prev_ref_job = job
             TeraChem._correct_signs_from_charges(job, self._prev_ref_job)
 
-        mol.mol_energies, mol.mol_gradients, mol.mol_NACs, _ = TeraChem.format_output_LSCIVR(job_batch.results_list)
+        all_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, _ = TeraChem.format_output_LSCIVR(job_batch.results_list)
         # return
 
         #   dipole and other gradients
         for job in self._prev_jobs:
-            print(job)
             if job.name == 'gradient_1':
                 mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
         mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(job_batch.jobs)
 
         hamiltonian = mol.set_hamiltonian(mol.mol_energies, mol.mol_dipole_matrix)
-        dH = mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
-        pol_evals, pol_evecs = mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
-        pol_NACs = mol.NA_coupling(mol.mol_NACs)
-        self._prev_evecs = pol_evecs
+        mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
+        mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
+        mol.NA_coupling(mol.mol_NACs)
+        mol.eigen_value_gradient()
+        mol.eigen_vector_gradient()
+        self._prev_evecs = mol.eigen_vecs
         
 
     def run_numerical_derivatives(self, mol_geom: np.ndarray, n_points=3, dx=0.01, run_overlaps=True, overlaps=None, set_dipoles=True):
@@ -485,7 +487,7 @@ class TCPolaritonRunner(TCRunner):
         # ref_job: TCJob = self._prev_jobs[-1]
         ref_job: TCJob = self._prev_jobs[1]
         self._update_job_from_tcout(ref_job)
-        ref_energies, grads, nacs, trans_dips = TeraChem.format_output_LSCIVR([x.results for x in self._prev_jobs])
+        all_energies, ref_energies, grads, nacs, trans_dips = TeraChem.format_output_LSCIVR([x.results for x in self._prev_jobs])
 
 
         #   run all of the numerical derivative jobs
@@ -506,7 +508,6 @@ class TCPolaritonRunner(TCRunner):
                 self._update_job_from_tcout(overlap_jobs[i])
                 TeraChem._correct_signs_from_overlaps(num_deriv_job, overlap_jobs[i])
             else:
-                # pass
                 TeraChem._correct_signs_from_charges(num_deriv_job, ref_job)
         # print("TIME: ", time()- start_time)
 

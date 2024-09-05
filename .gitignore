@@ -20,3 +20,4 @@ tests/derivatives_cis/tmp
 tests/*/logs*
 
 debug/
+tests/derivatives_cis_2/debug_traj.pkl
