@@ -4,6 +4,8 @@ from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
 from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch
+from pysces.fileIO import LoggerData, H5File, h5py
+
 from . import NumDeriv as numD
 import pickle
 import os
@@ -400,6 +402,37 @@ class CoupledMolecule(AdiabaticStates):
         self.hamiltonian = self._get_Nstate_hamiltonian(energies, dipoles)
         self.e_vals, self.e_vecs = self.diagonalize_H(self.hamiltonian)
 
+class PolaritonLogger():
+    def __init__(self) -> None:
+        self._h5_file: H5File = None
+        self._h5_group: h5py.Group
+        self._initialized = False
+        self._next_dataset: dict[str, np.ndarray] = {}
+        self._labels: dict[str,list[str]] = {}
+
+    def setup(self, logging_dir: str, h5_file: H5File):
+        self._logging_Dir = logging_dir
+        self._h5_file = h5_file
+        self._h5_group = h5_file.create_group('polariton')
+        self._h5_group.create_dataset('time', shape=(0,), maxshape=(None,), chunks=True)
+
+    def _initialize(self):
+        for key, data in self._next_dataset.items():
+            ds = self._h5_group.create_dataset(key, shape=(0,)+data.shape, maxshape=(None,)+data.shape)
+            ds.attrs.create('labels', self._labels)
+
+    def set_labels(self, labels: dict[str,list[str]]):
+        self._labels = labels.copy()
+
+    def add_next_dataset(self, data: dict):
+        self._next_dataset = data
+
+    def write(self, logger_data: LoggerData):
+        if not self._initialized:
+            self._initialize()
+        H5File.append_dataset(self._h5_group['time'], logger_data.time)
+        for key, data in self._next_dataset.items():
+            H5File.append_dataset(self._h5_group[key], data)
 
 class TCPolaritonRunner(TCRunner):
     def __init__(self,
@@ -424,6 +457,12 @@ class TCPolaritonRunner(TCRunner):
         self._prev_evecs = None
         self._prev_ref_job = None
 
+        self._logger = PolaritonLogger()
+
+    @property
+    def logger(self):
+        return self._logger
+
     def run_new_geom(self, geom):
         mol = self.coupled_mol
     
@@ -443,7 +482,7 @@ class TCPolaritonRunner(TCRunner):
 
         #   update jobs form tc.out file, and correct with esp charges
         for job in self._prev_jobs:
-            # print(job)
+            print(job.results.keys())
             self._update_job_from_tcout(job)
             if job.state == 0:
                 continue
@@ -451,8 +490,7 @@ class TCPolaritonRunner(TCRunner):
                 self._prev_ref_job = job
             TeraChem._correct_signs_from_charges(job, self._prev_ref_job)
 
-        all_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, _ = TeraChem.format_output_LSCIVR(job_batch.results_list)
-        # return
+        _, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, _ = TeraChem.format_output_LSCIVR(job_batch.results_list)
 
         #   dipole and other gradients
         for job in self._prev_jobs:
@@ -460,6 +498,7 @@ class TCPolaritonRunner(TCRunner):
                 mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
         mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(job_batch.jobs)
 
+        #   set hamiltonian, diagonalize, and compute needed gradients
         hamiltonian = mol.set_hamiltonian(mol.mol_energies, mol.mol_dipole_matrix)
         mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
         mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
@@ -467,6 +506,22 @@ class TCPolaritonRunner(TCRunner):
         mol.eigen_value_gradient()
         mol.eigen_vector_gradient()
         self._prev_evecs = mol.eigen_vecs
+
+        #   log all computed quantities
+        logged_data = {}
+        logged_data['hamiltonian'] = mol.hamiltonian
+        logged_data['eigenvalues'] = mol.eigen_vals
+        logged_data['eigenvectors'] = mol.eigen_vecs
+        logged_data['hamiltonian_grads'] = mol.dH
+        logged_data['eigenvalue_grads'] = mol.eigen_val_gradients
+        logged_data['NACs'] = mol.NACs
+        logged_data['dipole_matrix'] = mol.mol_dipole_matrix
+        logged_data['dipole_matrix_grads'] = mol.mol_dipole_matrix_gradient
+        self.logger.add_next_dataset(logged_data)
+
+        #   timings, all_energies, elecE, grad, nac, trans_dips
+        #   TODO: Compute transition dipoles!!!
+        return job_batch.timings, mol.eigen_vals, mol.eigen_vals, mol.eigen_val_gradients, mol.NACs, None
         
 
     def run_numerical_derivatives(self, mol_geom: np.ndarray, n_points=3, dx=0.01, run_overlaps=True, overlaps=None, set_dipoles=True):
@@ -512,8 +567,7 @@ class TCPolaritonRunner(TCRunner):
         # print("TIME: ", time()- start_time)
 
 
-        #   diagonalize reference hamiltonian
-        #   their eigenvectors will be used as a reference
+        #   diagonalize reference hamiltonian, their eigenvectors will be used as a reference
         ref_dipoles = self.dipole_matrix_from_job(ref_job)
         mol.set_hamiltonian(ref_energies, ref_dipoles)
         mol.diagonalize_H()
@@ -643,7 +697,8 @@ class TCPolaritonRunner(TCRunner):
                 derivs = np.array(tc_job.results['cis_transition_dipole_deriv'])
                 #   swap second and 4th axis. The last axis is now mX,mY,mZ
                 #   then, flatten the middle two axis, which are the cartesian coordinates
-                derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_states, -1, 3)
+                n_elms = n_states*(n_states-1)//2
+                derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_elms, -1, 3)
 
                 indicies = np.transpose(np.tril_indices(n_states, k=-1))
                 for count, (i, j) in enumerate(indicies):
