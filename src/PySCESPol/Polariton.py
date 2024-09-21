@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
 from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch
 from pysces.fileIO import LoggerData, H5File, h5py
+from pysces.subroutines import SignFlipper
+from qcelemental.models import Molecule
 
 from . import NumDeriv as numD
 import pickle
@@ -30,185 +32,185 @@ DEBYE_2_AU = 0.3934303
 AU_2_DEBYE = 1/DEBYE_2_AU
 
 #   TODO: Fix the circular import problem with pysces so we can import this directly.
-class SignFlipper():
-    def __init__(self, n_states: int, hist_length: int, n_nuc: int, name: str='UNK') -> None:
-        ''' Checks which sign for the NAC is expected. 
-            Artificial sign flips will be corrected and history is logged
+# class SignFlipper():
+#     def __init__(self, n_states: int, hist_length: int, n_nuc: int, name: str='UNK') -> None:
+#         ''' Checks which sign for the NAC is expected. 
+#             Artificial sign flips will be corrected and history is logged
 
-            Parameters
-            ----------
-            n_states: int
-                number of states that will be passed in to the NAC arrays
-            hist_length: int
-                number of points to keep track of in the history.
-                if hist_length=2, we use a linear extrapolation, hist_length=3 is quadratic, and so on
-            n_nuc: int
-                number of nuclei coordinates
-            name: str
-                name of the sign flipper to use when printing sign flip messages
+#             Parameters
+#             ----------
+#             n_states: int
+#                 number of states that will be passed in to the NAC arrays
+#             hist_length: int
+#                 number of points to keep track of in the history.
+#                 if hist_length=2, we use a linear extrapolation, hist_length=3 is quadratic, and so on
+#             n_nuc: int
+#                 number of nuclei coordinates
+#             name: str
+#                 name of the sign flipper to use when printing sign flip messages
                 
-            Notes
-            -----
-            Predict d(t) from d(t-1),d(t-2) with a linear extrapolation 
-            The line through the points (-2,k),(-1,l)
-            is p(x) = (l-k)*x + 2*l - k
-            Extrapolation to the next time step yields
-            p(0) = 2*l - k
-            Do that for all NACs and all vector components
-            If available, countercheck if transition dipole moment has also flipped sign
-            One can also do a higher degree polynomial or choose more points, which uses numpy polyfit then.
-            Right now, the degree is hard coded to 1 with 2 history points
+#             Notes
+#             -----
+#             Predict d(t) from d(t-1),d(t-2) with a linear extrapolation 
+#             The line through the points (-2,k),(-1,l)
+#             is p(x) = (l-k)*x + 2*l - k
+#             Extrapolation to the next time step yields
+#             p(0) = 2*l - k
+#             Do that for all NACs and all vector components
+#             If available, countercheck if transition dipole moment has also flipped sign
+#             One can also do a higher degree polynomial or choose more points, which uses numpy polyfit then.
+#             Right now, the degree is hard coded to 1 with 2 history points
 
-            If there is not history, do not correct artificial sign flips
-            if len(nac_hist) == 0:
-            return nac, []
-            if tdm is not None:
-                use_tdm = True
-            else:
-                use_tdm = False
-        '''
-        self.hist_length = hist_length
-        self.n_states = n_states
-        self.n_nuc = n_nuc
-        self.nac_hist = np.zeros((n_states, n_states, n_nuc, hist_length))
-        self.tdm_hist = np.zeros((n_states, n_states, 3, hist_length))
-        self.name = name
+#             If there is not history, do not correct artificial sign flips
+#             if len(nac_hist) == 0:
+#             return nac, []
+#             if tdm is not None:
+#                 use_tdm = True
+#             else:
+#                 use_tdm = False
+#         '''
+#         self.hist_length = hist_length
+#         self.n_states = n_states
+#         self.n_nuc = n_nuc
+#         self.nac_hist = np.zeros((n_states, n_states, n_nuc, hist_length))
+#         self.tdm_hist = np.zeros((n_states, n_states, 3, hist_length))
+#         self.name = name
 
 
-    # def create_history(self, nac: np.ndarray, trans_dips=None):
-    #     for it in range(0,self.hist_length):
-    #         self.nac_hist[:,:,:,it] = nac
-    #         if trans_dips is not None:
-    #             self.tdm_hist[:,:,:,it] = trans_dips
+#     # def create_history(self, nac: np.ndarray, trans_dips=None):
+#     #     for it in range(0,self.hist_length):
+#     #         self.nac_hist[:,:,:,it] = nac
+#     #         if trans_dips is not None:
+#     #             self.tdm_hist[:,:,:,it] = trans_dips
    
-    def set_history(self, nac, nac_hist_in: np.ndarray, trans_dips: np.ndarray = None, tdm_hist_in: np.ndarray=None):
-        # If nac_hist and tdm_hist array does not exist yet, create it as zeros array
-        if nac_hist_in.size == 0:
-            self.nac_hist = np.zeros((self.n_states,self.n_states,self.n_nuc, self.hist_length))
-            # fill array with current nac
-            for it in range(0,self.hist_length):
-                self.nac_hist[:,:,:,it] = nac
-        # exit()
-        if tdm_hist_in.size == 0:
-            self.tdm_hist = np.zeros((self.n_states,self.n_states,3,self.hist_length))
-            # fill array with current tdm (if available)
-            if trans_dips is not None:
-                for it in range(0,self.hist_length):
-                    self.tdm_hist[:,:,:,it] = trans_dips
+#     def set_history(self, nac, nac_hist_in: np.ndarray, trans_dips: np.ndarray = None, tdm_hist_in: np.ndarray=None):
+#         # If nac_hist and tdm_hist array does not exist yet, create it as zeros array
+#         if nac_hist_in.size == 0:
+#             self.nac_hist = np.zeros((self.n_states,self.n_states,self.n_nuc, self.hist_length))
+#             # fill array with current nac
+#             for it in range(0,self.hist_length):
+#                 self.nac_hist[:,:,:,it] = nac
+#         # exit()
+#         if tdm_hist_in.size == 0:
+#             self.tdm_hist = np.zeros((self.n_states,self.n_states,3,self.hist_length))
+#             # fill array with current tdm (if available)
+#             if trans_dips is not None:
+#                 for it in range(0,self.hist_length):
+#                     self.tdm_hist[:,:,:,it] = trans_dips
 
-    def correct_nac_sign(self, nac: np.ndarray, tdm: np.ndarray=None, debug=False):
-        '''Check which sign for the nac is expected and correct artificial sign flips
+#     def correct_nac_sign(self, nac: np.ndarray, tdm: np.ndarray=None, debug=False):
+#         '''Check which sign for the nac is expected and correct artificial sign flips
 
-        Parameters
-        ----------
-        nac: np.ndarray, shape (n, n, N)
-            nonadiabatic coupling vectors for `n` states and `N` nuclei.
-        tdm: np.ndarray, shape (n, n, 3)
-            transition dipole moment from the ground state to each of the `n` states with `N` nuclei.
-            For now, the diagonal elements (i, i, :) should be a 3-vector of zeros
-        '''
+#         Parameters
+#         ----------
+#         nac: np.ndarray, shape (n, n, N)
+#             nonadiabatic coupling vectors for `n` states and `N` nuclei.
+#         tdm: np.ndarray, shape (n, n, 3)
+#             transition dipole moment from the ground state to each of the `n` states with `N` nuclei.
+#             For now, the diagonal elements (i, i, :) should be a 3-vector of zeros
+#         '''
 
-        if tdm is None:
-            use_tdm = False
-        elif len(tdm) == 0:
-            use_tdm = False
-        else:
-            use_tdm = True
-        if debug: print("TDM HIST: ", self.tdm_hist, self.hist_length)
-
-
-        polynom_degree = 1 # hardcoded. 1 is usually sufficient. 2 is in principle better but could lead to artificial oscillations
-
-        # Allocate array for extrapolated vector
-        nac_expol = np.empty_like(nac)
-        if (polynom_degree == 1):
-            # default
-            # uses only the last 2 points
-            nac_expol = 2.0*self.nac_hist[:,:,:,-1] - 1.0*self.nac_hist[:,:,:,-2]
-        else:
-            # for scientific purposes only
-            # uses the whole history
-            timesteps = np.arange(self.hist_length)
-            for i in range(0, self.n_states):
-                for j in range(0, self.n_states):
-                    for ix in range(0,nac.shape[2]):
-                        coefficients = np.polyfit(timesteps, self.nac_hist[i,j,ix,:], polynom_degree)
-                        nac_expol[i,j,ix] = np.polyval(coefficients,self.hist_length)
-
-        # Do similar with transition dipole moment
-        if use_tdm:
-            tdm_expol = np.empty_like(tdm)
-            if (polynom_degree == 1):
-                tdm_expol = 2.0*self.tdm_hist[:,:,:,-1] - 1.0*self.tdm_hist[:,:,:,-2]
-            else:
-                timesteps = np.arange(self.hist_length)
-                for i in range(0, self.n_states):
-                    for j in range(0, self.n_states):
-                        for ix in range(0,3):
-                            coefficients = np.polyfit(timesteps,self.tdm_hist[i,j,ix,:], polynom_degree)
-                            tdm_expol[i,j,ix] = np.polyval(coefficients,self.hist_length)
+#         if tdm is None:
+#             use_tdm = False
+#         elif len(tdm) == 0:
+#             use_tdm = False
+#         else:
+#             use_tdm = True
+#         if debug: print("TDM HIST: ", self.tdm_hist, self.hist_length)
 
 
-        # check whether the TC/GAMESS vector goes in the same or opposite direction
-        # (means an angle with more than 90 degree) as the estimation
-        # if the angle is < 90 degree -> np.sign(dot_product)== 1 -> no flip
-        # if the angle is > 90 degree -> np.sign(dot_product)==-1 -> flip
-        message = ''
-        for i in range(0, self.n_states):
-            for j in range(i, self.n_states):
-                flip_detected = False
-                nac_dot_product = np.dot(nac[i,j,:],nac_expol[i,j,:])
-                # if tdm is available: check if it also flips sign. if not, no correction
-                # if tdm is not available rely only on nac
-                if use_tdm:
-                    tdm_dot_product = np.dot(tdm[i,j,:],tdm_expol[i,j,:])
-                    sign_tdm = np.sign(tdm_dot_product)
-                    sign_nac = np.sign(nac_dot_product)
-                    if sign_tdm == sign_nac:
-                        if sign_nac < 0:
-                            flip_detected = True
-                        nac[i,j,:] = sign_nac*nac[i,j,:]
-                        nac[j,i,:] = sign_nac*nac[j,i,:]
+#         polynom_degree = 1 # hardcoded. 1 is usually sufficient. 2 is in principle better but could lead to artificial oscillations
+
+#         # Allocate array for extrapolated vector
+#         nac_expol = np.empty_like(nac)
+#         if (polynom_degree == 1):
+#             # default
+#             # uses only the last 2 points
+#             nac_expol = 2.0*self.nac_hist[:,:,:,-1] - 1.0*self.nac_hist[:,:,:,-2]
+#         else:
+#             # for scientific purposes only
+#             # uses the whole history
+#             timesteps = np.arange(self.hist_length)
+#             for i in range(0, self.n_states):
+#                 for j in range(0, self.n_states):
+#                     for ix in range(0,nac.shape[2]):
+#                         coefficients = np.polyfit(timesteps, self.nac_hist[i,j,ix,:], polynom_degree)
+#                         nac_expol[i,j,ix] = np.polyval(coefficients,self.hist_length)
+
+#         # Do similar with transition dipole moment
+#         if use_tdm:
+#             tdm_expol = np.empty_like(tdm)
+#             if (polynom_degree == 1):
+#                 tdm_expol = 2.0*self.tdm_hist[:,:,:,-1] - 1.0*self.tdm_hist[:,:,:,-2]
+#             else:
+#                 timesteps = np.arange(self.hist_length)
+#                 for i in range(0, self.n_states):
+#                     for j in range(0, self.n_states):
+#                         for ix in range(0,3):
+#                             coefficients = np.polyfit(timesteps,self.tdm_hist[i,j,ix,:], polynom_degree)
+#                             tdm_expol[i,j,ix] = np.polyval(coefficients,self.hist_length)
+
+
+#         # check whether the TC/GAMESS vector goes in the same or opposite direction
+#         # (means an angle with more than 90 degree) as the estimation
+#         # if the angle is < 90 degree -> np.sign(dot_product)== 1 -> no flip
+#         # if the angle is > 90 degree -> np.sign(dot_product)==-1 -> flip
+#         message = ''
+#         for i in range(0, self.n_states):
+#             for j in range(i, self.n_states):
+#                 flip_detected = False
+#                 nac_dot_product = np.dot(nac[i,j,:],nac_expol[i,j,:])
+#                 # if tdm is available: check if it also flips sign. if not, no correction
+#                 # if tdm is not available rely only on nac
+#                 if use_tdm:
+#                     tdm_dot_product = np.dot(tdm[i,j,:],tdm_expol[i,j,:])
+#                     sign_tdm = np.sign(tdm_dot_product)
+#                     sign_nac = np.sign(nac_dot_product)
+#                     if sign_tdm == sign_nac:
+#                         if sign_nac < 0:
+#                             flip_detected = True
+#                         nac[i,j,:] = sign_nac*nac[i,j,:]
+#                         nac[j,i,:] = sign_nac*nac[j,i,:]
                         
-                        tdm[i,j,:] = sign_tdm*tdm[i,j,:]
-                        tdm[j,i,:] = sign_tdm*tdm[j,i,:]
-                else:
-                    sign = np.sign(nac_dot_product)
-                    if sign < 0:
-                        flip_detected = True
-                    nac[i,j,:] = sign*nac[i,j,:]
-                    nac[j,i,:] = sign*nac[j,i,:]
+#                         tdm[i,j,:] = sign_tdm*tdm[i,j,:]
+#                         tdm[j,i,:] = sign_tdm*tdm[j,i,:]
+#                 else:
+#                     sign = np.sign(nac_dot_product)
+#                     if sign < 0:
+#                         flip_detected = True
+#                     nac[i,j,:] = sign*nac[i,j,:]
+#                     nac[j,i,:] = sign*nac[j,i,:]
 
-                if flip_detected:
-                    message += f'{self.name} NAC sign-flip detected between states {i} and {j}\n'
+#                 if flip_detected:
+#                     message += f'{self.name} NAC sign-flip detected between states {i} and {j}\n'
         
-        if message != '':
-            print(f'\n{message}\n')
+#         if message != '':
+#             print(f'\n{message}\n')
 
-        if debug:
-            print("nac_hist vor roll: ")
-            print("nh[:,:,0]")
-            print(self.nac_hist[:,:,:,0])
-            print("nh[:,:,1]")
-            print(self.nac_hist[:,:,:,1])
+#         if debug:
+#             print("nac_hist vor roll: ")
+#             print("nh[:,:,0]")
+#             print(self.nac_hist[:,:,:,0])
+#             print("nh[:,:,1]")
+#             print(self.nac_hist[:,:,:,1])
 
-        # roll array and update newest entry
-        self.nac_hist = np.roll(self.nac_hist,-1,axis=3)
-        self.nac_hist[:,:,:,self.hist_length-1] = nac
-        if use_tdm:
-            self.tdm_hist = np.roll(self.tdm_hist,-1,axis=3)
-            self.tdm_hist[:,:,:,self.hist_length-1] = tdm
+#         # roll array and update newest entry
+#         self.nac_hist = np.roll(self.nac_hist,-1,axis=3)
+#         self.nac_hist[:,:,:,self.hist_length-1] = nac
+#         if use_tdm:
+#             self.tdm_hist = np.roll(self.tdm_hist,-1,axis=3)
+#             self.tdm_hist[:,:,:,self.hist_length-1] = tdm
 
-        if debug:
-            print("nac_hist nach roll: ")
-            print("nh[:,:,0]")
-            print(self.nac_hist[:,:,:,0])
-            print("nh[:,:,1]")
-            print(self.nac_hist[:,:,:,1])
-            print("nh[:,:,2]")
-            input()
+#         if debug:
+#             print("nac_hist nach roll: ")
+#             print("nh[:,:,0]")
+#             print(self.nac_hist[:,:,:,0])
+#             print("nh[:,:,1]")
+#             print(self.nac_hist[:,:,:,1])
+#             print("nh[:,:,2]")
+#             input()
 
-        return nac
+#         return nac
 
 class AdiabaticStates():
     def __init__(self, n_states, n_nuclei) -> None:
@@ -373,7 +375,10 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, n_elec, n_nuc, field_dir=None) -> None:
+    def __init__(self, omega_c, s_low, s_high, n_nuc, field_dir=None) -> None:
+        n_elec = s_high - s_low + 1
+        if s_high < s_low:
+            raise ValueError('s_high must be greater than or equal to s_low')
         super().__init__(n_elec*2, n_nuc)
         self._field_dir = field_dir
         if self._field_dir is not None:
@@ -381,6 +386,8 @@ class CoupledMolecule(AdiabaticStates):
         self._omega_c = omega_c
         self._gc = None
         self._n_elec = n_elec
+        self._s_low = s_low
+        self._s_high = s_high
 
         n_pol = 2
         self._n_dim = n_pol * self._n_elec
@@ -578,7 +585,7 @@ class CoupledMolecule(AdiabaticStates):
 
     def set_gc_from_coupling(self, coupling, trans_dipole):
         scale_factor = coupling/(norm(trans_dipole)*sqrt(self.omega_c))
-        g_c = scale_factor*np.sqrt(self.omega_c)
+        g_c = scale_factor*sqrt(self.omega_c)
         self._gc = g_c
 
     def compute_adiabatic_states(self, energies, dipoles):
@@ -604,7 +611,8 @@ class PolaritonLogger():
     def _initialize(self):
         for key, data in self._next_dataset.items():
             ds = self._h5_group.create_dataset(key, shape=(0,)+data.shape, maxshape=(None,)+data.shape)
-            ds.attrs.create('labels', self._labels)
+            if len(self._labels) > 0:
+                ds.attrs.create('labels', self._labels[key])
 
     def set_labels(self, labels: dict[str,list[str]]):
         self._labels = labels.copy()
@@ -622,22 +630,27 @@ class PolaritonLogger():
 class TCPolaritonRunner(TCRunner):
     def __init__(self,
                  coupled_mol: CoupledMolecule,
-                 hosts: str, 
-                 ports: int, 
+                 S_low, S_high,
+                 hosts: str,
+                 ports: int,
                  atoms: list,
-                 tc_options: dict, 
-                 tc_spec_job_opts: dict = {}, 
-                 tc_initial_job_options: dict = None, 
-                 server_roots='.', 
-                 start_new: bool = False, 
-                 run_options: dict = {}, 
-                 max_wait=20) -> None:
-        super().__init__(hosts, ports, atoms, tc_options, tc_spec_job_opts, tc_initial_job_options, server_roots, start_new, run_options, max_wait)
+                 tc_options: dict,
+                 tc_spec_job_opts: dict = None,
+                 tc_initial_frame_options: dict = None,
+                 tc_client_assignments: list[list[str]] = None,
+                 server_roots = '.',
+                 tc_server_gpus:  bool=[],
+                 tc_state_options: dict={}, 
+                 max_wait=20,
+                 ) -> None:
+        super().__init__(hosts, ports, atoms, tc_options, tc_spec_job_opts, tc_initial_frame_options, tc_client_assignments, server_roots, tc_server_gpus, tc_state_options, max_wait)
 
         self.coupled_mol = coupled_mol
+        self.S_low = S_low
+        self.S_high = S_high
 
-        self._spec_job_opts['gradient_0'] = {'dipolederivative': 'yes'}
-        self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
+        # self._spec_job_opts['gradient_0'] = {'dipolederivative': 'yes'}
+        # self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
 
         self._prev_evecs = None
         self._prev_ref_job = None
@@ -686,12 +699,20 @@ class TCPolaritonRunner(TCRunner):
             #   ground state jobs don't have transition dipoles
             if job.state == 0:
                 continue
-            TeraChem._correct_signs_from_charges(job, self._prev_ref_job)
+            TeraChem._correct_signs(job, self._prev_ref_job)
             # TeraChem._correct_signs_from_charges(job, self._prev_ref_jobs[job.name])
 
         self._prev_ref_job = curr_ref_job
 
-        _, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)
+        all_mol_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)
+
+        print('After Calling TeraChem:')
+        print(f'    {mol.mol_energies.shape=}')
+        print(f'    {mol.mol_gradients.shape=}')
+        print(f'    {mol.mol_NACs.shape=}')
+        
+
+
         if self._n_steps == 0:
             self._mol_sign_flipper.set_history(mol.mol_NACs, np.empty(0), mol_trans_dips, np.empty(0))
         mol.mol_NACs.flags['WRITEABLE']=True
@@ -714,6 +735,11 @@ class TCPolaritonRunner(TCRunner):
         mol.eigen_value_gradient()
         mol.eigen_vector_gradient()
         self._prev_evecs = mol.eigen_vecs
+
+        print('ANALYSIS')
+        print(np.array(all_mol_energies) + mol.omega_c)
+        print(np.diag(hamiltonian))
+        input()
 
         #   log all computed quantities
         logged_data = {}
@@ -865,8 +891,13 @@ class TCPolaritonRunner(TCRunner):
         if TCParser is None:
             warnings.warn('TCParser could not be imported, please install TCParser')
             return
+        
+        # with open(f'_{job.name}.txt', 'w') as file:
+        #     for line in job.results['tc.out']:
+        #         file.write(line + '\n')
 
         job_data = TCParser().parse_from_list(job.results['tc.out'])
+
         for key in job_data:
             if key not in job.results:
                 job.results[key] = job_data[key]
@@ -907,35 +938,30 @@ class TCPolaritonRunner(TCRunner):
             TC jobs into a single matrix.
         '''
         dipole_grads = np.zeros_like(self.coupled_mol.mol_dipole_matrix_gradient)
-        n_states = self.coupled_mol._n_elec
+        n_ex_states = self.coupled_mol._s_high - min(self.coupled_mol._s_low, 1) + 1
         got_gs, got_ex, got_tr = False, False, False
         for tc_job in tc_jobs:
-
-            # print('TC JOB: ', tc_job)
-            # print(tc_job.results.keys())
-            # for line in tc_job.results['tc.out']: 
-            #     print(line)
-            # input()
-
             if 'cis_transition_dipole_deriv' in tc_job.results:
                 derivs = np.array(tc_job.results['cis_transition_dipole_deriv'])
                 #   swap second and 4th axis. The last axis is now mX,mY,mZ
                 #   then, flatten the middle two axis, which are the cartesian coordinates
-                n_elms = n_states*(n_states-1)//2
+                n_elms = n_ex_states*(n_ex_states+1)//2
+                print(f'{n_elms=} {derivs.shape=}')
+                # exit()
                 derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_elms, -1, 3)
 
-                indicies = np.transpose(np.tril_indices(n_states, k=-1))
+                indicies = np.transpose(np.tril_indices(n_ex_states-1, k=-1))
                 for count, (i, j) in enumerate(indicies):
                     dipole_grads[i, j] = derivs[count]
                     dipole_grads[j, i] = derivs[count]
                 got_tr = True
 
             if 'cis_dipole_deriv' in tc_job.results:
-                # for line in tc_job.results['tc.out']:
-                #     print(line)
+
                 derivs = np.array(tc_job.results['cis_dipole_deriv'])
-                derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_states-1, -1, 3)
-                for i in range(1, n_states):
+                print(f'{n_ex_states=} {derivs.shape=}')
+                derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_ex_states, -1, 3)
+                for i in range(1, n_ex_states):
                     dipole_grads[i, i] = derivs[i-1]
                 got_ex = True
 
