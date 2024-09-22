@@ -375,10 +375,13 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, s_low, s_high, n_nuc, field_dir=None) -> None:
-        n_elec = s_high - s_low + 1
-        if s_high < s_low:
-            raise ValueError('s_high must be greater than or equal to s_low')
+    def __init__(self, omega_c, n_elec, mol_grads, n_nuc, field_dir=None) -> None:
+        # n_elec = s_high - s_low + 1
+        # if s_high < s_low:
+        #     raise ValueError('s_high must be greater than or equal to s_low')
+
+        self.mol_grad_indices = mol_grads
+
         super().__init__(n_elec*2, n_nuc)
         self._field_dir = field_dir
         if self._field_dir is not None:
@@ -386,8 +389,7 @@ class CoupledMolecule(AdiabaticStates):
         self._omega_c = omega_c
         self._gc = None
         self._n_elec = n_elec
-        self._s_low = s_low
-        self._s_high = s_high
+
 
         n_pol = 2
         self._n_dim = n_pol * self._n_elec
@@ -433,6 +435,9 @@ class CoupledMolecule(AdiabaticStates):
                 state and the off-diagonal elements being the transition dipoles
         '''
         n_elec = self._n_elec
+        # for i in range(dipole_matrix.shape[0]):
+        #     for j in range(dipole_matrix.shape[1]):
+        #         print(f'{i=}, {j=}, {dipole_matrix[i,j]=}')
 
         mu_dot_field = np.zeros((n_elec, n_elec))
         if self._field_dir is not None:
@@ -465,9 +470,6 @@ class CoupledMolecule(AdiabaticStates):
 
                 H_t[i, j] = H_en + H_p + H_en_p + H_d
 
-                # if (i, j) == (6,7):
-                #     print(f'{H_en=} {H_p=} {H_en_p=} {H_d=} {a=}, {b=} {dipole_self[a, b]=} {dipole_matrix[a,b]=}')
-
         self.mol_energies = energies
         self.mol_dipole_matrix = dipole_matrix
         self.hamiltonian = H_t
@@ -481,6 +483,17 @@ class CoupledMolecule(AdiabaticStates):
             dipoles: (M_states, M_states, 3) array
             dipole_grads: (M_states, M_states, N_atoms*3, 3) array
         '''
+
+        full_grads = np.zeros((self._n_elec, self.n_nuclei*3))
+        for i, idx in enumerate(self.mol_grad_indices):
+            full_grads[idx] = gradients[i]
+
+        # print('In set_hamiltonian_gradient')
+        # print(f'    {gradients.shape=}')
+        # print(f'    {dipoles.shape=}')
+        # print(f'    {dipole_grads.shape=}')
+        # print(f'    {full_grads.shape=}')
+
 
         n_elec = self._n_elec
 
@@ -524,7 +537,7 @@ class CoupledMolecule(AdiabaticStates):
                 b, n = state_j
 
                 for nuc in range(self.n_nuclei*3):
-                    dH_en = gradients[a, nuc]*delta[a, b]*delta[m, n]
+                    dH_en = full_grads[a, nuc]*delta[a, b]*delta[m, n]
                     dH_p = 0.0
                     dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
                     dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
@@ -548,13 +561,19 @@ class CoupledMolecule(AdiabaticStates):
         return overlaps
     
     def get_basis_NACs(self, sub_basis_NACs):
+
+        full_sub_basis_NACs = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3))
+        for i, idx in enumerate(self.mol_grad_indices):
+            for j, idx2 in enumerate(self.mol_grad_indices):
+                full_sub_basis_NACs[idx, idx2] = sub_basis_NACs[i, j]
+
         #   first form couplings matrix in the molecule/photon basis
         basis_NACs = np.zeros((self._n_dim, self._n_dim, self._n_nuclei*3))
         for i, state_i in enumerate(self.state_pairs):
             for j, state_j in enumerate(self.state_pairs):
                 a, m = state_i
                 b, n = state_j
-                basis_NACs[i, j] = sub_basis_NACs[a, b]*(m == n)
+                basis_NACs[i, j] = full_sub_basis_NACs[a, b]*(m == n)
         return basis_NACs
 
     def _overlap_matrix(self, e_vecs_i, evecs_j, mol_overlaps):
@@ -630,7 +649,6 @@ class PolaritonLogger():
 class TCPolaritonRunner(TCRunner):
     def __init__(self,
                  coupled_mol: CoupledMolecule,
-                 S_low, S_high,
                  hosts: str,
                  ports: int,
                  atoms: list,
@@ -646,8 +664,6 @@ class TCPolaritonRunner(TCRunner):
         super().__init__(hosts, ports, atoms, tc_options, tc_spec_job_opts, tc_initial_frame_options, tc_client_assignments, server_roots, tc_server_gpus, tc_state_options, max_wait)
 
         self.coupled_mol = coupled_mol
-        self.S_low = S_low
-        self.S_high = S_high
 
         # self._spec_job_opts['gradient_0'] = {'dipolederivative': 'yes'}
         # self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
@@ -657,7 +673,7 @@ class TCPolaritonRunner(TCRunner):
         # self._prev_ref_jobs = {}
 
         self._logger = PolaritonLogger()
-        self._mol_sign_flipper = SignFlipper(coupled_mol._n_elec, 2, coupled_mol.n_nuclei*3, 'MOL')
+        self._mol_sign_flipper = SignFlipper(len(coupled_mol.mol_grad_indices), 2, coupled_mol.n_nuclei*3, 'MOL')
         self._pol_sign_flipper = SignFlipper(coupled_mol.n_states, 2, coupled_mol.n_nuclei*3, 'POL')
 
         self._n_steps = 0
@@ -706,19 +722,15 @@ class TCPolaritonRunner(TCRunner):
 
         all_mol_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)
 
-        print('After Calling TeraChem:')
-        print(f'    {mol.mol_energies.shape=}')
-        print(f'    {mol.mol_gradients.shape=}')
-        print(f'    {mol.mol_NACs.shape=}')
-        
-
-
+        # print('After Calling TeraChem:')
+        # print(f'    {mol.mol_energies.shape=}')
+        # print(f'    {mol.mol_gradients.shape=}')
+        # print(f'    {mol.mol_NACs.shape=}')
+    
         if self._n_steps == 0:
             self._mol_sign_flipper.set_history(mol.mol_NACs, np.empty(0), mol_trans_dips, np.empty(0))
         mol.mol_NACs.flags['WRITEABLE']=True
-        print('Correcting Molecule NACs')
         mol.mol_NACs = self._mol_sign_flipper.correct_nac_sign(mol.mol_NACs, mol_trans_dips)
-        print('Done')
 
 
         #   dipole and other gradients
@@ -728,18 +740,13 @@ class TCPolaritonRunner(TCRunner):
         mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(job_batch.jobs)
 
         #   set hamiltonian, diagonalize, and compute needed gradients
-        hamiltonian = mol.set_hamiltonian(mol.mol_energies, mol.mol_dipole_matrix)
+        hamiltonian = mol.set_hamiltonian(all_mol_energies, mol.mol_dipole_matrix)
         mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
         mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
         mol.NA_coupling(mol.mol_NACs)
         mol.eigen_value_gradient()
         mol.eigen_vector_gradient()
         self._prev_evecs = mol.eigen_vecs
-
-        print('ANALYSIS')
-        print(np.array(all_mol_energies) + mol.omega_c)
-        print(np.diag(hamiltonian))
-        input()
 
         #   log all computed quantities
         logged_data = {}
@@ -753,19 +760,19 @@ class TCPolaritonRunner(TCRunner):
         logged_data['dipole_matrix_grads'] = mol.mol_dipole_matrix_gradient
         self.logger.add_next_dataset(logged_data)
 
-        # print(f'{mol.NACs.shape=}')
-        # print(f'{mol.NACs[6, 7]=} {np.dot(mol.NACs[6, 7], self._prev_TMP)=}')
-        # self._prev_TMP = mol.NACs[6, 7].copy()
-
-        # print(f'{mol.eigen_vecs[:, 6]=}')
-        # print(f'{mol.eigen_vecs[:, 7]=}')
-
-        # print(f'{mol.dH[0,6, :].shape=} {mol.dH[0,6, :]=}')
-        # print(f'{mol.mol_dipole_matrix[0, 3]=}')
-
-        #   timings, all_energies, elecE, grad, nac, trans_dips
         #   TODO: Compute transition dipoles!!!
-        return job_batch.timings, mol.eigen_vals, mol.eigen_vals, mol.eigen_val_gradients, mol.NACs, None
+
+        if 0 not in self.coupled_mol.mol_grad_indices:
+            out_eigen_vals = mol.eigen_vals[1:]
+            out_eigen_val_grads = mol.eigen_val_gradients[1:]
+            out_NACs = mol.NACs[1:, 1:]
+        else:
+            out_eigen_vals = mol.eigen_vals
+            out_eigen_val_grads = mol.eigen_val_gradients
+            out_NACs = mol.NACs
+
+        return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
+
         
 
     def run_numerical_derivatives(self, mol_geom: np.ndarray, n_points=3, dx=0.01, run_overlaps=True, overlaps=None, set_dipoles=True):
@@ -938,7 +945,9 @@ class TCPolaritonRunner(TCRunner):
             TC jobs into a single matrix.
         '''
         dipole_grads = np.zeros_like(self.coupled_mol.mol_dipole_matrix_gradient)
-        n_ex_states = self.coupled_mol._s_high - min(self.coupled_mol._s_low, 1) + 1
+        # n_ex_states = self.coupled_mol._s_high - min(self.coupled_mol._s_low, 1) + 1
+        n_ex_states = self.coupled_mol._n_elec - 1
+
         got_gs, got_ex, got_tr = False, False, False
         for tc_job in tc_jobs:
             if 'cis_transition_dipole_deriv' in tc_job.results:
@@ -946,8 +955,6 @@ class TCPolaritonRunner(TCRunner):
                 #   swap second and 4th axis. The last axis is now mX,mY,mZ
                 #   then, flatten the middle two axis, which are the cartesian coordinates
                 n_elms = n_ex_states*(n_ex_states+1)//2
-                print(f'{n_elms=} {derivs.shape=}')
-                # exit()
                 derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_elms, -1, 3)
 
                 indicies = np.transpose(np.tril_indices(n_ex_states-1, k=-1))
@@ -959,7 +966,6 @@ class TCPolaritonRunner(TCRunner):
             if 'cis_dipole_deriv' in tc_job.results:
 
                 derivs = np.array(tc_job.results['cis_dipole_deriv'])
-                print(f'{n_ex_states=} {derivs.shape=}')
                 derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_ex_states, -1, 3)
                 for i in range(1, n_ex_states):
                     dipole_grads[i, i] = derivs[i-1]
