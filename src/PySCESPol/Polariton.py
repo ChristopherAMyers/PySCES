@@ -4,9 +4,10 @@ from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
 from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch
-from pysces.fileIO import LoggerData, H5File, h5py
+from pysces.fileIO import LoggerData, H5File, h5py, TCJobsLogger
 from pysces.subroutines import SignFlipper
 from qcelemental.models import Molecule
+from qcelemental.periodic_table import periodictable as pt
 
 from . import NumDeriv as numD
 import pickle
@@ -32,6 +33,7 @@ ANG_2_BOHR = 1/BOHR_2_ANG
 DEBYE_2_AU = 0.3934303
 AU_2_DEBYE = 1/DEBYE_2_AU
 
+AMU_2_AU = 1.822888486*10**3
 
 
 class AdiabaticStates():
@@ -466,6 +468,48 @@ class CoupledMolecule(AdiabaticStates):
         self.hamiltonian = self._get_Nstate_hamiltonian(energies, dipoles)
         self.e_vals, self.e_vecs = self.diagonalize_H(self.hamiltonian)
 
+import numpy as np
+from collections import deque
+
+class DipoleMatrixTracker:
+    def __init__(self, order, history_size, interval=1):
+        self.order = order
+        self.history_size = history_size
+        self.interval = interval
+        self.history_y = deque(maxlen=history_size)
+        self.history_t = deque(maxlen=history_size)
+        self.polynomial_coeffs = None
+
+    def update_history(self, new_time, new_data):
+        self.history_y.append(np.array(new_data))
+        self.history_t.append(new_time)
+        if len(self.history_y) == self.history_size:
+            self._fit_polynomial()
+
+    def _fit_polynomial(self):
+        # Flatten the matrices and stack them into a 2D array
+        stacked_history = np.vstack([np.ravel(matrix) for matrix in self.history_y])
+        # Fit a polynomial to each column of the 2D array
+        self.polynomial_coeffs = np.polyfit(self.history_t, stacked_history, self.order)
+
+    def check_if_ready(self):
+        return len(self.history_y) == self.history_size
+    
+    def check_if_compute_derivative(self, new_time):
+        if len(self.history_y) < self.history_size:
+            return True
+        return (1+new_time - len(self.history_y)) % self.interval == 0
+
+    def get_matrix_at_time(self, new_time):
+        if self.polynomial_coeffs is None:
+            raise ValueError("Not enough history to fit a polynomial yet")
+        
+        # Evaluate the polynomial at the given time
+        # new_time = len(self.history_size) - 1 + n_time_steps
+        values = np.polyval(self.polynomial_coeffs, new_time)
+        # Reshape the flat array back into a matrix
+        return values.reshape(self.history_y[0].shape)
+
 class PolaritonLogger():
     def __init__(self) -> None:
         self._h5_file: H5File = None
@@ -498,13 +542,12 @@ class PolaritonLogger():
         H5File.append_dataset(self._h5_group['time'], logger_data.time)
         for key, data in self._next_dataset.items():
             H5File.append_dataset(self._h5_group[key], data)
-
 class TCPolaritonRunner(TCRunner):
     def __init__(self,
                  coupled_mol: CoupledMolecule,
                  hosts: str,
                  ports: int,
-                 atoms: list,
+                 atoms: list[str],
                  tc_options: dict,
                  tc_spec_job_opts: dict = None,
                  tc_initial_frame_options: dict = None,
@@ -517,6 +560,8 @@ class TCPolaritonRunner(TCRunner):
         super().__init__(hosts, ports, atoms, tc_options, tc_spec_job_opts, tc_initial_frame_options, tc_client_assignments, server_roots, tc_server_gpus, tc_state_options, max_wait)
 
         self.coupled_mol = coupled_mol
+        from qcelemental.periodic_table import periodictable as pt
+        self.masses = np.array([[pt.to_mass(symbol)]*3 for symbol in atoms]).flatten()
 
         # self._spec_job_opts['gradient_0'] = {'dipolederivative': 'yes'}
         # self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
@@ -526,21 +571,205 @@ class TCPolaritonRunner(TCRunner):
         # self._prev_ref_jobs = {}
 
         self._logger = PolaritonLogger()
+        self._tc_logger = TCJobsLogger()
         self._mol_sign_flipper = SignFlipper(len(coupled_mol.mol_grad_indices), 2, coupled_mol.n_nuclei*3, 'MOL')
         self._pol_sign_flipper = SignFlipper(coupled_mol.n_states, 2, coupled_mol.n_nuclei*3, 'POL')
 
         self._n_steps = 0
+        self._momentum_history = deque(maxlen=50)
+        self._position_history = deque(maxlen=50)
+        self._dipole_matrix_history = deque(maxlen=50)
 
-        self._prev_TMP = 0.0
-
+        self._run_dipole_derivatives = True
+        self._ran_actual_dipoles = False
+        self._dpmd_tracker    = DipoleMatrixTracker(order=2, history_size=3, interval=10)
 
     @property
     def polariton_logger(self):
         return self._logger
-
-    def run_new_geom(self, geom):
-        mol = self.coupled_mol
     
+    @property
+    def tc_logger(self):
+        return self._tc_logger
+
+    def _send_jobs_to_clients_OLD(self, jobs_batch: TCJobBatch):
+        ''' Overwrite the send jobs to clients method to add the dipole derivatives options '''
+        
+        if not self._run_dipole_derivatives:
+            super()._send_jobs_to_clients(jobs_batch)
+            return self.correct_signs(jobs_batch)
+        
+        gs_job_ID, ex_job_ID, tr_job_ID = None, None, None
+        for job in jobs_batch.jobs:
+            if 'dipolederivative' in job.opts:
+                gs_job_ID: TCJob = job.jobID
+            if 'cisdipolederiv' in job.opts:
+                ex_job_ID: TCJob  = job.jobID
+            if 'cistransdipolederiv' in job.opts:
+                tr_job_ID: TCJob  = job.jobID
+        
+        # if not self._dpmg_tracker_gs.check_if_compute_derivative(self._n_steps):
+        if not self._dpmd_tracker.check_if_compute_derivative(self._n_steps):
+            #   we are not running dipole derivatives, so torn off the options and replace with
+            #   the interpolated values
+            print('DEBUG: NOT RUNNING DIPOLE DERIVATIVES')
+
+            jobs_batch.get_by_id(gs_job_ID).opts['dipolederivative'] = 'no'
+            jobs_batch.get_by_id(ex_job_ID).opts['cisdipolederiv'] = 'no'
+            jobs_batch.get_by_id(tr_job_ID).opts['cistransdipolederiv'] = 'no'
+
+            super()._send_jobs_to_clients(jobs_batch)
+            self.correct_signs(jobs_batch)
+            self._ran_actual_dipoles = False
+
+        else:
+            #   continue with the normal procedure
+            super()._send_jobs_to_clients(jobs_batch)
+            self.correct_signs(jobs_batch)
+            self._ran_actual_dipoles = True
+
+
+        return jobs_batch
+
+    def _send_jobs_to_clients(self, jobs_batch: TCJobBatch):
+        ''' Overwrite the send jobs to clients method to add the dipole derivatives options '''
+        
+        mol = self.coupled_mol
+
+        if not self._run_dipole_derivatives:
+            super()._send_jobs_to_clients(jobs_batch)
+            return self.correct_signs(jobs_batch)
+        
+        # gs_job_ID, ex_job_ID, tr_job_ID = None, None, None
+        # for job in jobs_batch.jobs:
+        #     if 'dipolederivative' in job.opts:
+        #         gs_job_ID: TCJob = job.jobID
+        #     if 'cisdipolederiv' in job.opts:
+        #         ex_job_ID: TCJob  = job.jobID
+        #     if 'cistransdipolederiv' in job.opts:
+        #         tr_job_ID: TCJob  = job.jobID
+
+        gs_job, ex_job, tr_job = None, None, None
+        for job in jobs_batch.jobs:
+            if 'dipolederivative' in job.opts:
+                gs_job = job
+            if 'cisdipolederiv' in job.opts:
+                ex_job = job
+            if 'cistransdipolederiv' in job.opts:
+                tr_job = job
+        
+        # if not self._dpmg_tracker_gs.check_if_compute_derivative(self._n_steps):
+        if not self._dpmd_tracker.check_if_compute_derivative(self._n_steps):
+            #   we are not running dipole derivatives, so torn off the options and replace with
+            #   the interpolated values
+            print('DEBUG: NOT RUNNING DIPOLE DERIVATIVES AT STEP ', self._n_steps)
+
+            gs_job.opts['dipolederivative'] = 'no'
+            ex_job.opts['cisdipolederiv'] = 'no'
+            tr_job.opts['cistransdipolederiv'] = 'no'
+
+            # jobs_batch.get_by_id(gs_job_ID).opts['dipolederivative'] = 'no'
+            # jobs_batch.get_by_id(ex_job_ID).opts['cisdipolederiv'] = 'no'
+            # jobs_batch.get_by_id(tr_job_ID).opts['cistransdipolederiv'] = 'no'
+
+            super()._send_jobs_to_clients(jobs_batch)
+            self.correct_signs(jobs_batch)
+
+            for job in jobs_batch.jobs:
+                if job.name == 'gradient_1':
+                    mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
+            self._dipole_matrix_history.append(mol.mol_dipole_matrix)
+            mol.mol_dipole_matrix_gradient = self._dpmd_tracker.get_matrix_at_time(self._n_steps)
+
+            print(set([gs_job, ex_job, tr_job]))
+
+            min_deviation_matrix = self.check_dipole_matrix_accuracy(mol.mol_dipole_matrix)
+            if np.max(min_deviation_matrix) > 0.01:
+                print('ERROR EXCEDED CUTOFF: ', np.max(min_deviation_matrix))
+                gs_job.opts['dipolederivative'] = 'yes'
+                ex_job.opts['cisdipolederiv'] = 'yes'
+                tr_job.opts['cistransdipolederiv'] = 'yes'
+
+                new_job_batch = TCJobBatch(list(set([gs_job, ex_job, tr_job])))
+                super()._send_jobs_to_clients(new_job_batch)
+                self.correct_signs(new_job_batch)
+
+                print('UPDATING HISTORY AT STEP', self._n_steps)
+                mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(jobs_batch.jobs)
+                self._dpmd_tracker.update_history(self._n_steps, mol.mol_dipole_matrix_gradient)
+
+        else:
+            #   continue with the normal procedure
+            print('UPDATING HISTORY ', self._n_steps)
+            super()._send_jobs_to_clients(jobs_batch)
+            self.correct_signs(jobs_batch)
+
+        
+            for job in jobs_batch.jobs:
+                if job.name == 'gradient_1':
+                    mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
+            self._dipole_matrix_history.append(mol.mol_dipole_matrix)
+            mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(jobs_batch.jobs)
+
+            self._dpmd_tracker.update_history(self._n_steps, mol.mol_dipole_matrix_gradient)
+            
+
+        return jobs_batch
+
+    def check_dipole_matrix_accuracy(self, mol_dipole_matrix):
+        n_prev_steps = self._n_steps - self._dpmd_tracker.history_t[-1]
+        velocities = self._momentum_history[-n_prev_steps-1]/(self.masses * AMU_2_AU)
+        extrap_dipole_deriv = self._dpmd_tracker.get_matrix_at_time(self._n_steps)
+
+
+        mu_0 = self._dipole_matrix_history[-n_prev_steps-1]
+        delta_mu = np.sum(extrap_dipole_deriv * velocities[:, None], axis=2)*n_prev_steps
+        extrap_dipole_mat = mu_0 + delta_mu
+        actual_dipole_mat = mol_dipole_matrix
+
+        error_matrix = np.linalg.norm(extrap_dipole_mat - actual_dipole_mat, axis=2)
+
+        print(f'{n_prev_steps=}')
+        for i in range(mol_dipole_matrix.shape[0]):
+            for j in range(i, mol_dipole_matrix.shape[1]):
+                if i > 0 and j > i:
+                    #   We don't care about transitions between two excited states
+                    error_matrix[i, j] = 0.0
+                    error_matrix[j, i] = 0.0
+                mag = np.linalg.norm(actual_dipole_mat[i, j])
+                extrap_mag = np.linalg.norm(extrap_dipole_mat[i, j])
+                diff = np.abs(np.linalg.norm(extrap_dipole_mat[i, j]) - mag)
+                pct_diff = 100*diff/mag
+                print(f'{i=}, {j=}, {diff=:10.6f}  {pct_diff=:10.6f}  {mag=:10.6f}  {extrap_mag=:10.6f}  {error_matrix[i, j]=:10.6f}')
+
+        return error_matrix
+
+    def correct_signs(self, job_batch: TCJobBatch):
+        # use the highest gradient state as the reference job
+        grad_batch = job_batch.get_by_type('gradient')
+        curr_ref_job = grad_batch.sorted_jobs_by_state()[-1]
+        if self._prev_ref_job is None:
+            self._update_job_from_tcout(curr_ref_job)
+            self._prev_ref_job = curr_ref_job
+
+        #   update jobs form tc.out file, and correct with esp charges
+        for job in job_batch.jobs:
+            self._update_job_from_tcout(job)
+            #   ground state jobs don't have transition dipoles
+            if job.state == 0:
+                continue
+
+            TeraChem._correct_signs(job, self._prev_ref_job)
+
+        self._prev_ref_job = curr_ref_job
+        return job_batch
+
+    def run_new_geom(self, geom, momentum):
+        mol = self.coupled_mol
+
+        self._position_history.append(geom)
+        self._momentum_history.append(momentum)
+
         #   Run TeraChem
         if not TeraChem._DEBUG:
             job_batch = self.run_TC_new_geom(geom)
@@ -555,42 +784,25 @@ class TCPolaritonRunner(TCRunner):
                     self._prev_jobs = job_batch.jobs
         job_batch: TCJobBatch
 
-        # use the highest gradient state as the reference job
-        grad_batch = job_batch.get_by_type('gradient')
-        curr_ref_job = grad_batch.sorted_jobs_by_state()[-1]
-        if self._prev_ref_job is None:
-            self._update_job_from_tcout(curr_ref_job)
-            self._prev_ref_job = curr_ref_job
 
-        #   update jobs form tc.out file, and correct with esp charges
-        for job in job_batch.jobs:
-            self._update_job_from_tcout(job)
-            #   ground state jobs don't have transition dipoles
-            if job.state == 0:
-                continue
-            TeraChem._correct_signs(job, self._prev_ref_job)
-            # TeraChem._correct_signs_from_charges(job, self._prev_ref_jobs[job.name])
+        #   dipole and other gradients
+        # for job in job_batch.jobs:
+        #     if job.name == 'gradient_1':
+        #         mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
+        # self._dipole_matrix_history.append(mol.mol_dipole_matrix)
 
-        self._prev_ref_job = curr_ref_job
+
+        # if not self._dpmd_tracker.check_if_compute_derivative(self._n_steps):
+        #     self.check_dipole_matrix_accuracy(mol.mol_dipole_matrix)
+
+
 
         all_mol_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)
-    
+        self._tc_logger.set_next_dataset(job_batch)
         if self._n_steps == 0:
             self._mol_sign_flipper.set_history(mol.mol_NACs, np.empty(0), mol_trans_dips, np.empty(0))
         mol.mol_NACs.flags['WRITEABLE']=True
         mol.mol_NACs = self._mol_sign_flipper.correct_nac_sign(mol.mol_NACs, mol_trans_dips)
-
-
-        #   dipole and other gradients
-        for job in job_batch.jobs:
-            if job.name == 'gradient_1':
-                mol.mol_dipole_matrix = self.dipole_matrix_from_job(job)
-        mol.mol_dipole_matrix_gradient = self.dipole_matrix_gradient_from_jobs(job_batch.jobs)
-
-
-        print(f'{mol.mol_dipole_matrix_gradient.shape=}')
- 
-
 
 
         #   set hamiltonian, diagonalize, and compute needed gradients
@@ -614,7 +826,7 @@ class TCPolaritonRunner(TCRunner):
         logged_data['dipole_matrix_grads'] = mol.mol_dipole_matrix_gradient
         self.polariton_logger.set_next_dataset(logged_data)
 
-        self.print_results()
+        # self.print_results()
 
         #   TODO: Compute transition dipoles!!!
 
@@ -627,7 +839,7 @@ class TCPolaritonRunner(TCRunner):
             out_eigen_val_grads = mol.eigen_val_gradients
             out_NACs = mol.NACs
 
-        # self._n_steps += 1
+        self._n_steps += 1
         return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
 
     def print_results(self):
@@ -866,6 +1078,7 @@ class TCPolaritonRunner(TCRunner):
         #     for line in job.results['tc.out']:
         #         file.write(line + '\n')
 
+
         job_data = TCParser().parse_from_list(job.results['tc.out'])
 
         for key in job_data:
@@ -922,7 +1135,6 @@ class TCPolaritonRunner(TCRunner):
 
                 indicies = np.transpose(np.triu_indices(n_ex_states+1, k=+1))
                 for count, (i, j) in enumerate(indicies):
-                    print(i,j)
                     dipole_grads[i, j] = derivs[count]
                     dipole_grads[j, i] = derivs[count]
                 got_tr = True
@@ -943,8 +1155,12 @@ class TCPolaritonRunner(TCRunner):
 
         if not got_gs or not got_ex or not got_tr:
             print('TC JOBS:')
+            from pprint import pprint
             for job in tc_jobs:
                 print(job.name)
+                for k, v in job.results.items():
+                    print(f'{k}:')
+                    pprint(v)
                 print(json.dumps(job.results, indent=4))
                 print('\n\n')
 
