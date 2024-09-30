@@ -302,11 +302,6 @@ class CoupledMolecule(AdiabaticStates):
                 self._H_en_p[i, j] = H_en_p
                 self._H_d[i, j] = H_d
 
-                # print(dipole_matrix[a, b], self._field_dir, np.dot(dipole_matrix[a, b], self._field_dir))
-                # print('Setting Ham: ', state_i, state_j, mu_dot_field[a, b])
-                # print(f'    {H_t[i, j]=}, {H_en=}, {H_p=}, {H_en_p=}, {H_d=}')
-                # input()
-
         self.mol_energies = energies
         self.mol_dipole_matrix = dipole_matrix
         self.hamiltonian = H_t
@@ -485,6 +480,17 @@ class DipoleMatrixTracker:
         self.name = name
 
     def update_history(self, new_t, new_grads, new_f):
+
+        #   before we update, let's get one more extrapolation to check how close we are
+        if self.polynomial_coeffs is not None:
+            guess = np.polyval(self.polynomial_coeffs, new_t)
+            guess = guess.reshape(self.history_grads[0].shape)
+            error = np.abs(guess - new_grads)
+            max_error = np.max(error)
+            rms_error = np.sqrt(np.mean(error**2))
+            print(f'Before updating extrapolation history in {self.name} at time {new_t}: ')
+            print(f'    {max_error=:.5e}, {rms_error=:.5e}')
+
         self.history_grads.append(np.array(new_grads))
         self.history_t.append(new_t)
         self.history_f.append(new_f)
@@ -540,12 +546,8 @@ class DipoleMatrixTracker:
         if self.polynomial_coeffs is None:
             print(f'Not enough history to fit a polynomial yet for {self.name}: Returning Last Value')
             return self.history_grads[-1]
-
-
         print(f'Extrapolating {self.name} at time {t}; {self.history_t[-1]=}')
         values = np.polyval(self.polynomial_coeffs, t)
-        last_histrory = self.history_grads[-1].reshape(values.shape)
-        print('Diff = ', np.max(np.abs(values - last_histrory)))
         return values.reshape(self.history_grads[0].shape)
 
 class PolaritonLogger():
@@ -698,21 +700,21 @@ class TCPolaritonRunner(TCRunner):
         updated_gs, updated_ex, updated_tr = False, False, False
         if gs_job.opts['dipolederivative'] == 'yes':
             updated_gs = True
-            dipole_grads_gs = self.get_gs_dipole_gradient_from_jobs(jobs_batch)
-            self._dpmd_tracker_gs.update_history(self._n_steps, dipole_grads_gs, dipoles_gs)
+            gs_dipole_grad = self.get_gs_dipole_gradient_from_jobs(jobs_batch)
+            self._dpmd_tracker_gs.update_history(self._n_steps, gs_dipole_grad, dipoles_gs)
         if ex_job.opts['cisdipolederiv'] == 'yes':
             updated_ex = True
-            dipole_grads_ex = self.get_ex_dipole_gradient_from_jobs(jobs_batch)
-            self._dpmd_tracker_ex.update_history(self._n_steps, dipole_grads_ex, dipoles_ex)
+            ex_dipole_grad = self.get_ex_dipole_gradient_from_jobs(jobs_batch)
+            self._dpmd_tracker_ex.update_history(self._n_steps, ex_dipole_grad, dipoles_ex)
         if tr_job.opts['cistransdipolederiv'] == 'yes':
             updated_tr = True
-            dipole_grads_tr = self.get_tr_dipole_gradient_from_jobs(jobs_batch)
-            print(f'{dipole_grads_tr.shape=}, {dipoles_tr.shape=}')
-            self._dpmd_tracker_tr.update_history(self._n_steps, dipole_grads_tr, dipoles_tr)
+            tr_dipole_grad = self.get_tr_dipole_gradient_from_jobs(jobs_batch)
+            self._dpmd_tracker_tr.update_history(self._n_steps, tr_dipole_grad, dipoles_tr)
         
         if updated_gs and updated_ex and updated_tr:
+            mol.mol_dipole_matrix_gradient = self.state_data_to_matrix(gs_dipole_grad, ex_dipole_grad, tr_dipole_grad)
             print('All dipole derivatives updated')
-            # if self._n_steps % 10 == 0 and self._n_steps > 0:
+            # if self._n_steps % 1 == 0 and self._n_steps > 0:
             #     input('Continue?')
             return jobs_batch
 
@@ -743,14 +745,14 @@ class TCPolaritonRunner(TCRunner):
             self.correct_signs(new_job_batch, ref_job)
         
             if gs_redo:
-                mol.mol_dipole_matrix_gradient = self.get_gs_dipole_gradient_from_jobs(new_job_batch)
-                self._dpmd_tracker_gs.update_history(self._n_steps, mol.mol_dipole_matrix_gradient, dipoles_gs)
+                gs_dipole_grad = self.get_gs_dipole_gradient_from_jobs(new_job_batch)
+                self._dpmd_tracker_gs.update_history(self._n_steps, gs_dipole_grad, dipoles_gs)
             if ex_redo:
-                mol.mol_dipole_matrix_gradient = self.get_ex_dipole_gradient_from_jobs(new_job_batch)
-                self._dpmd_tracker_ex.update_history(self._n_steps, mol.mol_dipole_matrix_gradient, dipoles_ex)
+                ex_dipole_grad = self.get_ex_dipole_gradient_from_jobs(new_job_batch)
+                self._dpmd_tracker_ex.update_history(self._n_steps, ex_dipole_grad, dipoles_ex)
             if tr_redo:
-                mol.mol_dipole_matrix_gradient = self.get_tr_dipole_gradient_from_jobs(new_job_batch)
-                self._dpmd_tracker_tr.update_history(self._n_steps, mol.mol_dipole_matrix_gradient, dipoles_tr)
+                tr_dipole_grad = self.get_tr_dipole_gradient_from_jobs(new_job_batch)
+                self._dpmd_tracker_tr.update_history(self._n_steps, tr_dipole_grad, dipoles_tr)
 
         gs_dipole_grad = self._dpmd_tracker_gs.extrapolate(self._n_steps)
         ex_dipole_grad = self._dpmd_tracker_ex.extrapolate(self._n_steps)
@@ -758,8 +760,8 @@ class TCPolaritonRunner(TCRunner):
         mol.mol_dipole_matrix_gradient = self.state_data_to_matrix(gs_dipole_grad, ex_dipole_grad, tr_dipole_grad)
 
 
-        # if self._n_steps % 10 == 0 and self._n_steps > 0:
-        #         input('Continue?')
+        # if self._n_steps % 1 == 0 and self._n_steps > 0:
+        #     input('Continue?')
         return jobs_batch
 
 
@@ -771,9 +773,8 @@ class TCPolaritonRunner(TCRunner):
         if not ready:
             return False, False, False
 
-        print('Previous Momentum time ', self._momentum_history[-2][0], 'Current time: ', self._n_steps)
+        print('Previous Momentum time '     , self._momentum_history[-2][0], 'Current time: ', self._n_steps)
         print('Previous Dipole-matrix time ', self._dipole_matrix_history[-2][0], 'Current time: ', self._n_steps)
-        print([np.linalg.norm(x[1][0,0]) for x in self._dipole_matrix_history])
 
 
         velocities = self._momentum_history[-2][1]/(self.masses * AMU_2_AU)
@@ -813,7 +814,7 @@ class TCPolaritonRunner(TCRunner):
         for j in range(1, mol_dipole_matrix.shape[0]):
             if error_matrix[0, j] > cutoff:
                 tr_redo = True
-            flag_str = '*'*(error_matrix[0, i] > cutoff)
+            flag_str = '*'*(error_matrix[0, j] > cutoff)
             print(f'DIPDIF  {0}   {j}   {diff_mags[0, j]:10.6f}  {pct_diff_mags[0, j]:10.6f}  {actual_mags[0, j]:10.6f}  {extrap_mags[0, j]:10.6f}  {error_matrix[0, j]:10.6f}', flag_str)
         print('\nEx-Ex Transitions:')
         print('--------------------')
@@ -827,7 +828,6 @@ class TCPolaritonRunner(TCRunner):
         gs_redo = bool(error_matrix[0, 0] > cutoff)
 
         return (gs_redo, ex_redo, tr_redo)
-
 
     def correct_signs(self, job_batch: TCJobBatch, ref_job=None):
         if ref_job is None:
@@ -902,7 +902,7 @@ class TCPolaritonRunner(TCRunner):
         logged_data['dipole_matrix_grads'] = mol.mol_dipole_matrix_gradient
         self.polariton_logger.set_next_dataset(logged_data)
 
-        # self.print_results()
+        self.print_results()
 
         #   TODO: Compute transition dipoles!!!
 
@@ -1000,8 +1000,8 @@ class TCPolaritonRunner(TCRunner):
         print('\n')
         
 
-        with open('coupled_mol.pkl', 'wb') as file:
-            pickle.dump(mol, file)
+        # with open('coupled_mol.pkl', 'wb') as file:
+        #     pickle.dump(mol, file)
 
         if True:
             self.print_dipole_derivatives()
@@ -1243,7 +1243,6 @@ class TCPolaritonRunner(TCRunner):
                 #   swap second and 4th axis. The last axis is now mX,mY,mZ
                 #   then, flatten the middle two axis, which are the cartesian coordinates
                 dipole_grads = derivs.transpose((0, 2, 3, 1)).reshape(n_grads, -1, 3)
-                print('IN GET TR DIPOLE GRADS: ', derivs.shape, dipole_grads.shape)
                 # indicies = np.transpose(np.triu_indices(n_ex_states+1, k=+1))
                 # for count, (i, j) in enumerate(indicies):
                 #     dipole_grads[i, j] = derivs[count]
