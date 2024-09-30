@@ -17,6 +17,7 @@ import warnings
 from typing import Literal
 from time import time
 import json
+from collections import deque
 
 try:
     from tcparse import TCParser
@@ -465,9 +466,6 @@ class CoupledMolecule(AdiabaticStates):
         self.hamiltonian = self._get_Nstate_hamiltonian(energies, dipoles)
         self.e_vals, self.e_vecs = self.diagonalize_H(self.hamiltonian)
 
-import numpy as np
-from collections import deque
-
 class DipoleMatrixTracker:
     def __init__(self, order, history_size, interval=1, name='UNKNOWN'):
         self.order = order
@@ -582,6 +580,7 @@ class PolaritonLogger():
         H5File.append_dataset(self._h5_group['time'], logger_data.time)
         for key, data in self._next_dataset.items():
             H5File.append_dataset(self._h5_group[key], data)
+
 class TCPolaritonRunner(TCRunner):
     def __init__(self,
                  coupled_mol: CoupledMolecule,
@@ -626,6 +625,48 @@ class TCPolaritonRunner(TCRunner):
         self._dpmd_tracker_gs = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='GS')
         self._dpmd_tracker_ex = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='EX')
         self._dpmd_tracker_tr = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='TR')
+
+        #   load the previous state of the runner if it exists
+        if os.path.isfile('_polariton_runner.pkl'):
+            print('DEBUG: LOADING IN PREVIOUS POLARITON RUNNER STATE')
+            with open('_polariton_runner.pkl', 'rb') as f:
+                state = pickle.load(f)
+                missing_in_pickle = self.__dict__.keys() - state.__dict__.keys()
+                extra_in_pickle = state.__dict__.keys() - self.__dict__.keys()
+                print(f'Missing objects in pickle: {missing_in_pickle}')
+                print(f'Extra objects in pickle: {extra_in_pickle}')
+                self.__setstate__(state.__dict__)
+
+    def __getstate__(self):
+        ''' Load in state for pickling.
+            Any objects that are not picklable (mostly when they contian a socket object)
+            are replaced with the NotPicklable class.
+        '''
+        state = self.__dict__.copy()
+        for attr, value in list(state.items()):
+            try:
+                pickle.dumps(value)
+            except pickle.PicklingError:
+                print(f"{attr} is not picklable and will not be saved.")
+                state.pop(attr)
+            except TypeError:  # Some objects raise TypeError instead
+                print(f"{attr} is not picklable and will not be saved.")
+                state.pop(attr)
+        return state
+    
+    def __setstate__(self, state):
+        ''' Needed for pickling. 
+            Any objects that are not picklable (mostly when they contian a socket object)
+            should have been replaced with the NotPicklable class.
+        '''
+        for attr, value in state.items():
+            self.__dict__[attr] = value
+    
+    def save_state(self):
+        print('DEBUG: Saving Polariton Runner State')
+        with open('_polariton_runner.pkl', 'wb') as f:
+            pickle.dump(self, f)
+        # exit()
 
     @property
     def polariton_logger(self):
@@ -854,8 +895,8 @@ class TCPolaritonRunner(TCRunner):
         return curr_ref_job
 
     def run_new_geom(self, geom, momentum):
-        mol = self.coupled_mol
 
+        mol = self.coupled_mol
         self._position_history.append((self._n_steps, geom))
         self._momentum_history.append((self._n_steps, momentum))
 
@@ -916,6 +957,7 @@ class TCPolaritonRunner(TCRunner):
             out_NACs = mol.NACs
 
         self._n_steps += 1
+        self.save_state()
         return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
 
     def print_results(self):
