@@ -621,10 +621,11 @@ class TCPolaritonRunner(TCRunner):
 
         self._run_dipole_derivatives = True
         self._ran_actual_dipoles = False
-        self._dpmd_tracker    = DipoleMatrixTracker(order=2, history_size=3, interval=10)
         self._dpmd_tracker_gs = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='GS')
         self._dpmd_tracker_ex = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='EX')
         self._dpmd_tracker_tr = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='TR')
+
+        self._print_level = 1
 
         #   load the previous state of the runner if it exists
         if os.path.isfile('_polariton_runner.pkl'):
@@ -667,6 +668,11 @@ class TCPolaritonRunner(TCRunner):
         with open('_polariton_runner.pkl', 'wb') as f:
             pickle.dump(self, f)
         # exit()
+
+    def set_print_level(self, level):
+        if level not in [0, 1, 2]:
+            raise ValueError('Print level must be 0, 1, or 2')
+        self._print_level = level
 
     @property
     def polariton_logger(self):
@@ -961,6 +967,8 @@ class TCPolaritonRunner(TCRunner):
         return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
 
     def print_results(self):
+        if self._print_level == 0:
+            return
         mol = self.coupled_mol
 
         print(' ########## Polariton Addon ##########')
@@ -1049,6 +1057,8 @@ class TCPolaritonRunner(TCRunner):
             self.print_dipole_derivatives()
     
     def print_dipole_derivatives(self):
+        if self._print_level < 1:
+            return
         mol = self.coupled_mol
         print('Molecular Dipole Moment Derivatives (a.u.):\n')
         for i in range(mol.mol_dipole_matrix_gradient.shape[0]):
