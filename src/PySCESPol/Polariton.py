@@ -636,6 +636,18 @@ class TCPolaritonRunner(TCRunner):
                 extra_in_pickle = state.__dict__.keys() - self.__dict__.keys()
                 print(f'Missing objects in pickle: {missing_in_pickle}')
                 print(f'Extra objects in pickle: {extra_in_pickle}')
+                for key, val in list(state.__dict__.items()):
+
+                    if key in ['_spec_job_opts', '_base_options', '_initial_frame_options']:
+                        if val != self.__dict__[key]:
+                            print('    TC Runner options have changed: ', key)
+                            print('    New: ')
+                            for k, v in self.__dict__[key].items():
+                                print(f'        {k=}, {v=}')
+                            print('    Old: ')
+                            for k, v in val.items():
+                                print(f'        {k=}, {v=}')
+                            state.__dict__.pop(key)
                 self.__setstate__(state.__dict__)
 
     def __getstate__(self):
@@ -767,8 +779,6 @@ class TCPolaritonRunner(TCRunner):
         if updated_gs and updated_ex and updated_tr:
             mol.mol_dipole_matrix_gradient = self.state_data_to_matrix(gs_dipole_grad, ex_dipole_grad, tr_dipole_grad)
             print('All dipole derivatives updated')
-            # if self._n_steps % 1 == 0 and self._n_steps > 0:
-            #     input('Continue?')
             return jobs_batch
 
         gs_redo, ex_redo, tr_redo = self.check_dipole_matrix_accuracy()
@@ -914,7 +924,7 @@ class TCPolaritonRunner(TCRunner):
 
         #   Run TeraChem
         if not TeraChem._DEBUG:
-            job_batch = self.run_TC_new_geom(geom)
+            job_batch = self.run_TC_new_geom(geom, correct_signs=False)
         else:
             if not os.path.isfile('_ref_jobs.pkl'):
                 job_batch = self.run_TC_new_geom(geom)
