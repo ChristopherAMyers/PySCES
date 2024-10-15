@@ -595,6 +595,7 @@ class TCPolaritonRunner(TCRunner):
                  tc_server_gpus:  bool=[],
                  tc_state_options: dict={}, 
                  max_wait=20,
+                 prev_ref_job: TCJob = None,
                  ) -> None:
         super().__init__(hosts, ports, atoms, tc_options, tc_spec_job_opts, tc_initial_frame_options, tc_client_assignments, server_roots, tc_server_gpus, tc_state_options, max_wait)
 
@@ -606,7 +607,7 @@ class TCPolaritonRunner(TCRunner):
         # self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
 
         self._prev_evecs = None
-        self._prev_ref_job = None
+        self._prev_ref_job = prev_ref_job
         # self._prev_ref_jobs = {}
 
         self._logger = PolaritonLogger()
@@ -636,6 +637,18 @@ class TCPolaritonRunner(TCRunner):
                 extra_in_pickle = state.__dict__.keys() - self.__dict__.keys()
                 print(f'Missing objects in pickle: {missing_in_pickle}')
                 print(f'Extra objects in pickle: {extra_in_pickle}')
+                for key, val in list(state.__dict__.items()):
+
+                    if key in ['_spec_job_opts', '_base_options', '_initial_frame_options']:
+                        if val != self.__dict__[key]:
+                            print('    TC Runner options have changed: ', key)
+                            print('    New: ')
+                            for k, v in self.__dict__[key].items():
+                                print(f'        {k=}, {v=}')
+                            print('    Old: ')
+                            for k, v in val.items():
+                                print(f'        {k=}, {v=}')
+                            state.__dict__.pop(key)
                 self.__setstate__(state.__dict__)
 
     def __getstate__(self):
@@ -684,10 +697,18 @@ class TCPolaritonRunner(TCRunner):
     
     def state_data_to_matrix(self, gs_data, ex_data, tr_data):
         n_elec = self.coupled_mol._n_elec
+        
         out_matrix = np.zeros((n_elec, n_elec,) + gs_data.shape)
         out_matrix[0, 0] = gs_data
         out_matrix[1:, 1:] = ex_data
-        out_matrix[np.triu_indices(n_elec, k=1)] = tr_data
+        count = 0
+        for i in range(n_elec):
+            for j in range(i+1, n_elec):
+                out_matrix[i, j] = tr_data[count]
+                out_matrix[j, i] = tr_data[count]
+                count += 1
+        # out_matrix[np.triu_indices(n_elec, k=1)] = tr_data
+
         return out_matrix
     
     def matrix_to_state_data(self, matrix):
@@ -705,6 +726,9 @@ class TCPolaritonRunner(TCRunner):
         if not self._run_dipole_derivatives:
             super()._send_jobs_to_clients(jobs_batch)
             self.correct_signs(jobs_batch)
+            
+            # mol.mol_dipole_matrix = self.dipole_matrix_from_job(jobs_batch)
+            # mol.mol_dipole_matrix_gradient = 
             return jobs_batch
 
         gs_job, ex_job, tr_job = None, None, None
@@ -761,8 +785,6 @@ class TCPolaritonRunner(TCRunner):
         if updated_gs and updated_ex and updated_tr:
             mol.mol_dipole_matrix_gradient = self.state_data_to_matrix(gs_dipole_grad, ex_dipole_grad, tr_dipole_grad)
             print('All dipole derivatives updated')
-            # if self._n_steps % 1 == 0 and self._n_steps > 0:
-            #     input('Continue?')
             return jobs_batch
 
         gs_redo, ex_redo, tr_redo = self.check_dipole_matrix_accuracy()
@@ -810,7 +832,6 @@ class TCPolaritonRunner(TCRunner):
         # if self._n_steps % 1 == 0 and self._n_steps > 0:
         #     input('Continue?')
         return jobs_batch
-
 
     def check_dipole_matrix_accuracy(self) -> tuple[bool, bool, bool]:
 
@@ -895,6 +916,7 @@ class TCPolaritonRunner(TCRunner):
             if job.state == 0:
                 continue
 
+            print('Correcting signs for job ', job.name)
             TeraChem._correct_signs(job, self._prev_ref_job)
 
         self._prev_ref_job = curr_ref_job
@@ -908,7 +930,7 @@ class TCPolaritonRunner(TCRunner):
 
         #   Run TeraChem
         if not TeraChem._DEBUG:
-            job_batch = self.run_TC_new_geom(geom)
+            job_batch = self.run_TC_new_geom(geom, correct_signs=False)
         else:
             if not os.path.isfile('_ref_jobs.pkl'):
                 job_batch = self.run_TC_new_geom(geom)
