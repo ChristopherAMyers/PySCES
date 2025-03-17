@@ -670,9 +670,10 @@ class TCPolaritonRunner(TCRunner):
 
 
     def save_state(self):
-        print('DEBUG: Saving Polariton Runner State')
-        with open('_polariton_runner.pkl', 'wb') as f:
-            pickle.dump(self, f)
+        pass
+        # print('DEBUG: Saving Polariton Runner State')
+        # with open('_polariton_runner.pkl', 'wb') as f:
+        #     pickle.dump(self, f)
 
     def set_print_level(self, level):
         if level not in [0, 1, 2]:
@@ -1341,9 +1342,9 @@ class TCPolaritonRunner(TCRunner):
         search_key = 'cis_dipole_deriv'
 
 
-        for j in jobs_batch.jobs:
-            with open(f'job_{j.name}.txt', 'w') as file:
-                pprint(j.results, file)
+        # for j in jobs_batch.jobs:
+        #     with open(f'job_{j.name}.txt', 'w') as file:
+        #         pprint(j.results, file)
 
 
         for tc_job in jobs_batch.jobs:
