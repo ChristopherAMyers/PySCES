@@ -3,7 +3,7 @@ from numpy.linalg import norm
 from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
-from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch
+from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch, TCRunnerOptions, ESResults
 from pysces.fileIO import LoggerData, H5File, h5py, TCJobsLogger
 from pysces.subroutines import SignFlipper
 from qcelemental.models import Molecule
@@ -24,6 +24,7 @@ try:
 except:
     TCParser = None
 
+from pprint import pprint
 
 AU_2_EV = 27.2114079527
 EV_2_AU = 1/27.2114079527
@@ -516,16 +517,7 @@ class DipoleMatrixTracker:
     def predict_at_time(self, time, velocities, f_0):
         if self.polynomial_coeffs is None:
             raise ValueError("Not enough history to fit a polynomial yet")            
-        
-        # dt = time - self.history_t[-1]
-        # f_0 = self.history_f[-1]
-        # grads = np.polyval(self.polynomial_coeffs, time).reshape(self.history_grads[0].shape)
-        # prod = grads * velocities[:, None]
-        # axis = len(grads.shape) - 2
-        # delta_f = np.sum(grads * velocities[:, None], axis=axis)*dt
-        # extrap_f = f_0 + delta_f
 
-        # dt = time - self.history_t[-1]
         if time == self.history_t[-1]:
             dt = 0.0
         else:
@@ -581,34 +573,19 @@ class PolaritonLogger():
         for key, data in self._next_dataset.items():
             H5File.append_dataset(self._h5_group[key], data)
 
+from openmm.openmm import CustomExternalForce
+
 class TCPolaritonRunner(TCRunner):
-    def __init__(self,
-                 coupled_mol: CoupledMolecule,
-                 hosts: str,
-                 ports: int,
-                 atoms: list[str],
-                 tc_options: dict,
-                 tc_spec_job_opts: dict = None,
-                 tc_initial_frame_options: dict = None,
-                 tc_client_assignments: list[list[str]] = [],
-                 server_roots = '.',
-                 tc_server_gpus:  bool=[],
-                 tc_state_options: dict={}, 
-                 max_wait=20,
-                 prev_ref_job: TCJob = None,
-                 ) -> None:
-        super().__init__(hosts, ports, atoms, tc_options, tc_spec_job_opts, tc_initial_frame_options, tc_client_assignments, server_roots, tc_server_gpus, tc_state_options, max_wait)
+        
+    def __init__(self, coupled_mol: CoupledMolecule, atoms: list, tc_opts: TCRunnerOptions, max_wait=20, prev_ref_job: TCJob = None,) -> None:
+
+        super().__init__(atoms, tc_opts, max_wait)
 
         self.coupled_mol = coupled_mol
-        from qcelemental.periodic_table import periodictable as pt
         self.masses = np.array([[pt.to_mass(symbol)]*3 for symbol in atoms]).flatten()
-
-        # self._spec_job_opts['gradient_0'] = {'dipolederivative': 'yes'}
-        # self._spec_job_opts['gradient_1'] = {'cistransdipolederiv': 'yes', 'cisdipolederiv': 'yes'}
 
         self._prev_evecs = None
         self._prev_ref_job = prev_ref_job
-        # self._prev_ref_jobs = {}
 
         self._logger = PolaritonLogger()
         self._tc_logger = TCJobsLogger()
@@ -620,7 +597,7 @@ class TCPolaritonRunner(TCRunner):
         self._position_history = deque(maxlen=50)
         self._dipole_matrix_history = deque(maxlen=50)
 
-        self._run_dipole_derivatives = True
+        self._run_dipole_derivative_interpolation = False
         self._ran_actual_dipoles = False
         self._dpmd_tracker_gs = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='GS')
         self._dpmd_tracker_ex = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='EX')
@@ -628,8 +605,12 @@ class TCPolaritonRunner(TCRunner):
 
         self._print_level = 1
 
+        #   In the middle of an API change
+        self._rk4_inteprolation = False
+        self._interpolation = False
+
         #   load the previous state of the runner if it exists
-        if os.path.isfile('_polariton_runner.pkl'):
+        if os.path.isfile('_polariton_runner.pkl') and False:
             print('DEBUG: LOADING IN PREVIOUS POLARITON RUNNER STATE')
             with open('_polariton_runner.pkl', 'rb') as f:
                 state = pickle.load(f)
@@ -651,6 +632,12 @@ class TCPolaritonRunner(TCRunner):
                             state.__dict__.pop(key)
                 self.__setstate__(state.__dict__)
 
+    def __eq__(self, o: object) -> bool:
+        if isinstance(o, str):
+            if o == 'TCRunner' or o.lower() == 'terachem':
+                return False
+        return super().__eq__(o)
+
     def __getstate__(self):
         ''' Load in state for pickling.
             Any objects that are not picklable (mostly when they contian a socket object)
@@ -660,11 +647,13 @@ class TCPolaritonRunner(TCRunner):
         for attr, value in list(state.items()):
             try:
                 pickle.dumps(value)
-            except pickle.PicklingError:
+            except pickle.PicklingError as e:
                 print(f"{attr} is not picklable and will not be saved.")
+                print(e)
                 state.pop(attr)
-            except TypeError:  # Some objects raise TypeError instead
+            except TypeError as e:  # Some objects raise TypeError instead
                 print(f"{attr} is not picklable and will not be saved.")
+                print(e)
                 state.pop(attr)
         return state
     
@@ -676,11 +665,14 @@ class TCPolaritonRunner(TCRunner):
         for attr, value in state.items():
             self.__dict__[attr] = value
     
+    def serialize(self):
+        out_data = {}
+
+
     def save_state(self):
         print('DEBUG: Saving Polariton Runner State')
         with open('_polariton_runner.pkl', 'wb') as f:
             pickle.dump(self, f)
-        # exit()
 
     def set_print_level(self, level):
         if level not in [0, 1, 2]:
@@ -696,6 +688,25 @@ class TCPolaritonRunner(TCRunner):
         return self._tc_logger
     
     def state_data_to_matrix(self, gs_data, ex_data, tr_data):
+        '''
+            Converts ground state, excited state, and transition data into a matrix representation.
+
+            Parameters
+            -----------
+            gs_data : numpy.ndarray
+                Ground state data.
+            ex_data : numpy.ndarray
+                Excited state data.
+            tr_data : numpy.ndarray
+                Transition data.
+
+            Returns
+            --------
+            numpy.ndarray
+                A matrix representation of the state data with dimensions (n_elec, n_elec) + gs_data.shape,
+                where n_elec is the number of electronic states.
+        '''
+       
         n_elec = self.coupled_mol._n_elec
         
         out_matrix = np.zeros((n_elec, n_elec,) + gs_data.shape)
@@ -723,12 +734,15 @@ class TCPolaritonRunner(TCRunner):
         
         mol = self.coupled_mol
 
-        if not self._run_dipole_derivatives:
+        if not self._run_dipole_derivative_interpolation:
             super()._send_jobs_to_clients(jobs_batch)
+            for j in jobs_batch.jobs:
+                self._update_job_from_tcout(j)
             self.correct_signs(jobs_batch)
             
-            # mol.mol_dipole_matrix = self.dipole_matrix_from_job(jobs_batch)
-            # mol.mol_dipole_matrix_gradient = 
+            mol.mol_dipole_matrix = self.dipole_matrix_from_job(jobs_batch.jobs[-1])
+            mol.mol_dipole_matrix_gradient = self.get_all_dipole_gradients_from_jobs(jobs_batch)
+            self._dipole_matrix_history.append((self._n_steps, mol.mol_dipole_matrix))
             return jobs_batch
 
         gs_job, ex_job, tr_job = None, None, None
@@ -916,7 +930,6 @@ class TCPolaritonRunner(TCRunner):
             if job.state == 0:
                 continue
 
-            print('Correcting signs for job ', job.name)
             TeraChem._correct_signs(job, self._prev_ref_job)
 
         self._prev_ref_job = curr_ref_job
@@ -930,19 +943,30 @@ class TCPolaritonRunner(TCRunner):
 
         #   Run TeraChem
         if not TeraChem._DEBUG:
-            job_batch = self.run_TC_new_geom(geom, correct_signs=False)
+            es_results = super().run_new_geom(geom=geom)
         else:
+            #   NOTE: BROKEN! This needs to be adjusted to use both a job_batch and an ESResults object
             if not os.path.isfile('_ref_jobs.pkl'):
-                job_batch = self.run_TC_new_geom(geom)
+                # job_batch = self.run_TC_new_geom(geom)
+                es_results = super().run_new_geom(geom=geom)
                 with open('_ref_jobs.pkl', 'wb') as file: 
                     pickle.dump(job_batch, file)
             else:
                 with open('_ref_jobs.pkl', 'rb') as file:
-                    job_batch = pickle.load(file)
-                    self._prev_jobs = job_batch.jobs
-        job_batch: TCJobBatch
+                    # job_batch = pickle.load(file)
+                    es_results = pickle.load(file)
+                    # self._prev_jobs = job_batch.jobs
+        job_batch: TCJobBatch = self._prev_job_batch
 
-        all_mol_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)
+        all_mol_energies = es_results.all_energies
+        mol.mol_energies = es_results.elecE
+        mol.mol_gradients = es_results.grads
+        mol.mol_NACs = es_results.nacs
+        mol_trans_dips = es_results.trans_dips
+
+
+        # all_mol_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)        
+
         self._tc_logger.set_next_dataset(job_batch)
         if self._n_steps == 0:
             self._mol_sign_flipper.set_history(mol.mol_NACs, np.empty(0), mol_trans_dips, np.empty(0))
@@ -986,7 +1010,11 @@ class TCPolaritonRunner(TCRunner):
 
         self._n_steps += 1
         self.save_state()
-        return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
+
+        if self._rk4_inteprolation:
+            return es_results
+        else:
+            return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
 
     def print_results(self):
         if self._print_level == 0:
@@ -1228,7 +1256,7 @@ class TCPolaritonRunner(TCRunner):
         #     for line in job.results['tc.out']:
         #         file.write(line + '\n')
 
-
+    
         job_data = TCParser().parse_from_list(job.results['tc.out'])
 
         for key in job_data:
@@ -1266,7 +1294,17 @@ class TCPolaritonRunner(TCRunner):
     
     def get_gs_dipole_gradient_from_jobs(self, jobs_batch: TCJobBatch):
         '''
-            extract ground state dipole matrix from a 
+            extract ground state dipole matrix from a TeraChem job batch
+
+            Parameters
+            ----------
+            jobs_batch: TCJobBatch
+                batch of jobs to extract the dipole derivatives from
+            
+            Returns
+            -------
+            np.ndarray: dipole_grads (n_states, 3 * n_atoms, 3)
+                dipole_grads[j, k] is the dipole gradient with respect to the jth atom and kth cartesian coordinate
         '''
         dipole_grads = np.zeros_like(self.coupled_mol.mol_dipole_matrix_gradient[0, 0])
         got_gs = False
@@ -1283,14 +1321,34 @@ class TCPolaritonRunner(TCRunner):
     
     def get_ex_dipole_gradient_from_jobs(self, jobs_batch: TCJobBatch):
         '''
-            extract excited state dipole matrix from a 
+            extract excited state dipole matrix from a TeraChem job batch
+
+            Parameters
+            ----------
+            jobs_batch: TCJobBatch
+                batch of jobs to extract the dipole derivatives from
+            
+            Returns
+            -------
+            np.ndarray: dipole_grads (n_states, 3 * n_atoms, 3)
+                dipole_grads[i, j, k] is the dipole gradient for the ith excited state
+                with respect to the jth atom and kth cartesian coordinate
         '''
         n_ex_states = self.coupled_mol._n_elec - 1
         dipole_grads = np.zeros((n_ex_states, self.coupled_mol.n_nuclei*3, 3))
         got_ex = False
+        # search_key = 'cis_unrelaxed_dipole_deriv'
+        search_key = 'cis_dipole_deriv'
+
+
+        for j in jobs_batch.jobs:
+            with open(f'job_{j.name}.txt', 'w') as file:
+                pprint(j.results, file)
+
+
         for tc_job in jobs_batch.jobs:
-            if 'cis_dipole_deriv' in tc_job.results:
-                derivs = np.array(tc_job.results['cis_dipole_deriv'])
+            if search_key in tc_job.results:
+                derivs = np.array(tc_job.results[search_key])
                 derivs = derivs.transpose((0, 2, 3, 1)).reshape(n_ex_states, -1, 3)
                 for i in range(0, n_ex_states):
                     dipole_grads[i] = derivs[i]
@@ -1303,7 +1361,19 @@ class TCPolaritonRunner(TCRunner):
     
     def get_tr_dipole_gradient_from_jobs(self, jobs_batch: TCJobBatch):
         '''
-            extract transition state dipole matrix from a 
+            extract transition state dipole matrix from a TeraChem job batch
+
+            Parameters
+            ----------
+            jobs_batch: TCJobBatch
+                batch of jobs to extract the dipole derivatives from
+
+            Returns
+            -------
+            np.ndarray: dipole_grads (n_states, n_states, 3 * n_atoms, 3)
+                dipole_grads[i, j, k] is the dipole gradient for the ith transition
+                with respect to the jth atom and kth cartesian coordinate. The i-th 
+                Transitions are ordered as (0, 1), (0, 2), ..., (0, n), (1, 2), ..., (n-1, n)
         '''
         dipole_grads = np.zeros_like(self.coupled_mol.mol_dipole_matrix_gradient)
         n_ex_states = self.coupled_mol._n_elec - 1
@@ -1329,22 +1399,25 @@ class TCPolaritonRunner(TCRunner):
         return dipole_grads
     
     def get_all_dipole_gradients_from_jobs(self, jobs_batch: TCJobBatch):
+        """
+        Retrieve and process all dipole gradients from a batch of jobs.
+
+        This method extracts ground state (GS), excited state (EX), and transition (TR) dipole gradients
+        from the provided job batch, prints their shapes and contents for debugging purposes, and then
+        converts the state data into a matrix format.
+
+        Args:
+            jobs_batch (TCJobBatch): A batch of jobs containing the necessary data to extract dipole gradients.
+
+        Returns:
+            np.ndarray: A matrix containing the processed dipole gradients for all states of shape (n_states, n_states, n_atoms, 3).
+        """
         gs_grads = self.get_gs_dipole_gradient_from_jobs(jobs_batch)
         ex_grads = self.get_ex_dipole_gradient_from_jobs(jobs_batch)
         tr_grads = self.get_tr_dipole_gradient_from_jobs(jobs_batch)
 
-        n_states = gs_grads.shape[0] + ex_grads.shape[0]
-        dipole_grads = np.zeros((n_states, n_states, self.coupled_mol.n_nuclei, 3))
 
-        dipole_grads[0, 0] = gs_grads
-        for i in range(1, n_states):
-            dipole_grads[i, j] = ex_grads[i-1]
-        indicies = np.transpose(np.triu_indices(n_states, k=+1))
-        for count, (i, j) in enumerate(indicies):
-            dipole_grads[i, j] = tr_grads[count]
-            dipole_grads[j, i] = tr_grads[count]
-
-        return dipole_grads
+        return self.state_data_to_matrix(gs_grads, ex_grads, tr_grads)
 
             
 
