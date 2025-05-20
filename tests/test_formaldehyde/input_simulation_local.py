@@ -1,6 +1,5 @@
 from PySCESPol.Polariton import TCPolaritonRunner, CoupledMolecule, TCRunnerOptions
 from qcelemental.models import Molecule
-from pysces.fileIO import LoggerData
 
 integrator = 'RK4'
 
@@ -87,9 +86,7 @@ tc_runner_opts.job_options = tcr_job_options
 tc_runner_opts.state_options = {'grads': [1, 2, 3, 4]}
 tc_runner_opts.server_root = tcr_server_root
 tc_runner_opts.spec_job_opts = tcr_spec_job_opts
-# tc_runner_opts.client_assignments = tcr_client_assignments
 QC_RUNNER = TCPolaritonRunner(coupled_mol, mol.symbols, tc_runner_opts)
-# QC_RUNNER._rk4_inteprolation = (integrator == 'RK4_Interpolation')
 extra_loggers = [QC_RUNNER.polariton_logger, QC_RUNNER.tc_logger]
 mol_input_format = 'terachem'
 QC_RUNNER.set_print_level(0)

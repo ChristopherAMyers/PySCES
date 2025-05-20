@@ -3,7 +3,7 @@ from numpy.linalg import norm
 from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
-from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch, TCRunnerOptions, ESResults
+from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch, TCRunnerOptions, format_combo_job_results
 from pysces.fileIO import LoggerData, H5File, h5py, TCJobsLogger
 from pysces.subroutines import SignFlipper
 from qcelemental.models import Molecule
@@ -20,9 +20,9 @@ import json
 from collections import deque
 
 try:
-    from tcparse import TCParser
+    from tcparse import parse_from_list
 except:
-    TCParser = None
+    warnings.warn('TCParser could not be imported, please install TCParser')
 
 from pprint import pprint
 
@@ -37,6 +37,37 @@ AU_2_DEBYE = 1/DEBYE_2_AU
 
 AMU_2_AU = 1.822888486*10**3
 
+#   helper functions
+def _expand_array(small_array: np.ndarray, target_shape: tuple, indices: list | np.ndarray) -> np.ndarray:
+    """
+    Expand a 3D array to a larger size, placing elements at specified indices.
+    
+    Parameters:
+    -----------
+    small_array : np.ndarray
+        Original array with shape (n, n, d)
+    target_shape : tuple
+        Shape of the new array (m, m, d) where m > n
+    indices : list
+        List of indices where the original array should be placed
+        
+    Returns:
+    --------
+    np.ndarray
+        New array with specified shape with small_array placed at the specified indices
+    """
+    if small_array.shape[0] != small_array.shape[1]:
+        raise ValueError("The first two dimensions of small_array must be equal.")
+    
+    # Create new array filled with zeros
+    new_array = np.zeros(target_shape)
+    
+    # Place elements from small_array into new_array at the specified indices
+    for old_i, new_i in enumerate(indices):
+        for old_j, new_j in enumerate(indices):
+            new_array[new_i, new_j, :] = small_array[old_i, old_j, :]
+    
+    return new_array
 
 class AdiabaticStates():
     def __init__(self, n_states, n_nuclei) -> None:
@@ -45,10 +76,13 @@ class AdiabaticStates():
         self.eigen_vals = np.zeros(n_states)
         self.eigen_vecs = np.zeros((n_states, n_states))
         self._hamiltonian = np.zeros((n_states, n_states))
+
+        #   should move these to CoupledMolecule
         self._H_d = np.zeros((n_states, n_states))
         self._H_en_p = np.zeros((n_states, n_states))
         self._H_p = np.zeros((n_states, n_states))
         self._H_en = np.zeros((n_states, n_states))
+
         self._dH = np.zeros((n_states, n_states, n_nuclei*3))
         self.NACs = np.zeros((n_states, n_states, n_nuclei*3))
         self.eigen_val_gradients = np.zeros((n_states, n_nuclei*3))
@@ -205,12 +239,13 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, n_elec, mol_grads, n_nuc, field_dir=None) -> None:
+    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None) -> None:
         # n_elec = s_high - s_low + 1
         # if s_high < s_low:
         #     raise ValueError('s_high must be greater than or equal to s_low')
 
         self.mol_grad_indices = mol_grads
+        n_elec = max(mol_grads) + 1
 
         super().__init__(n_elec*2, n_nuc)
         self._field_dir = field_dir
@@ -318,15 +353,12 @@ class CoupledMolecule(AdiabaticStates):
             dipole_grads: (M_states, M_states, N_atoms*3, 3) array
         '''
 
-        full_grads = np.zeros((self._n_elec, self.n_nuclei*3))
-        for i, idx in enumerate(self.mol_grad_indices):
-            full_grads[idx] = gradients[i]
+        # full_grads = np.zeros((self._n_elec, self.n_nuclei*3))
+        # for i, idx in enumerate(self.mol_grad_indices):
+        #     print('assigning grads: ', i, idx)
+        #     full_grads[idx] = gradients[i]
 
-        # print('In set_hamiltonian_gradient')
-        # print(f'    {gradients.shape=}')
-        # print(f'    {dipoles.shape=}')
-        # print(f'    {dipole_grads.shape=}')
-        # print(f'    {full_grads.shape=}')
+        full_grads = np.copy(gradients)
 
 
         n_elec = self._n_elec
@@ -342,6 +374,7 @@ class CoupledMolecule(AdiabaticStates):
                     mu_dot_field[a, b] = np.dot(dipoles[a, b], self._field_dir)
                     for nuc in range(self.n_nuclei*3):
                         grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], self._field_dir)
+                        
         #   Or, we assume that the field is always in the same direction as the dipole moments 
         else:
             for a in range(n_elec):
@@ -396,10 +429,14 @@ class CoupledMolecule(AdiabaticStates):
     
     def get_basis_NACs(self, sub_basis_NACs):
 
-        full_sub_basis_NACs = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3))
-        for i, idx in enumerate(self.mol_grad_indices):
-            for j, idx2 in enumerate(self.mol_grad_indices):
-                full_sub_basis_NACs[idx, idx2] = sub_basis_NACs[i, j]
+        #   Leaving this for now, as furutre updates should only use
+        #   The dimensions that include electronic structure components
+
+        # full_sub_basis_NACs = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3))
+        # for i, idx in enumerate(self.mol_grad_indices):
+        #     for j, idx2 in enumerate(self.mol_grad_indices):
+        #         full_sub_basis_NACs[idx, idx2] = sub_basis_NACs[i, j]
+
 
         #   first form couplings matrix in the molecule/photon basis
         basis_NACs = np.zeros((self._n_dim, self._n_dim, self._n_nuclei*3))
@@ -407,7 +444,7 @@ class CoupledMolecule(AdiabaticStates):
             for j, state_j in enumerate(self.state_pairs):
                 a, m = state_i
                 b, n = state_j
-                basis_NACs[i, j] = full_sub_basis_NACs[a, b]*(m == n)
+                basis_NACs[i, j] = sub_basis_NACs[a, b]*(m == n)
         return basis_NACs
 
     def _overlap_matrix(self, e_vecs_i, evecs_j, mol_overlaps):
@@ -541,6 +578,7 @@ class DipoleMatrixTracker:
         return values.reshape(self.history_grads[0].shape)
 
 class PolaritonLogger():
+    name = 'polariton'
     def __init__(self) -> None:
         self._h5_file: H5File = None
         self._h5_group: h5py.Group
@@ -551,7 +589,7 @@ class PolaritonLogger():
     def setup(self, logging_dir: str, h5_file: H5File):
         self._logging_Dir = logging_dir
         self._h5_file = h5_file
-        self._h5_group = h5_file.create_group('polariton')
+        self._h5_group = h5_file.create_group(self.name)
         self._h5_group.create_dataset('time', shape=(0,), maxshape=(None,), chunks=True)
 
     def _initialize(self):
@@ -587,7 +625,7 @@ class TCPolaritonRunner(TCRunner):
         self._prev_evecs = None
         self._prev_ref_job = prev_ref_job
 
-        self._logger = PolaritonLogger()
+        self._polariton_logger = PolaritonLogger()
         self._tc_logger = TCJobsLogger()
         self._mol_sign_flipper = SignFlipper(len(coupled_mol.mol_grad_indices), 2, coupled_mol.n_nuclei*3, 'MOL')
         self._pol_sign_flipper = SignFlipper(coupled_mol.n_states, 2, coupled_mol.n_nuclei*3, 'POL')
@@ -602,6 +640,8 @@ class TCPolaritonRunner(TCRunner):
         self._dpmd_tracker_gs = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='GS')
         self._dpmd_tracker_ex = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='EX')
         self._dpmd_tracker_tr = DipoleMatrixTracker(order=2, history_size=3, interval=10, name='TR')
+
+        self._previous_pysces_outputs = None
 
         self._print_level = 1
 
@@ -682,7 +722,7 @@ class TCPolaritonRunner(TCRunner):
 
     @property
     def polariton_logger(self):
-        return self._logger
+        return self._polariton_logger
     
     @property
     def tc_logger(self):
@@ -733,6 +773,10 @@ class TCPolaritonRunner(TCRunner):
     def _send_jobs_to_clients(self, jobs_batch: TCJobBatch):
         ''' Overwrite the send jobs to clients method to add the dipole derivatives options '''
         
+        return super()._send_jobs_to_clients(jobs_batch)
+
+        ''' need to fix the remaining'''
+
         mol = self.coupled_mol
 
         if not self._run_dipole_derivative_interpolation:
@@ -936,47 +980,103 @@ class TCPolaritonRunner(TCRunner):
         self._prev_ref_job = curr_ref_job
         return curr_ref_job
 
-    def run_new_geom(self, geom, momentum):
+    def run_new_geom(self, phase_vars: 'PhaseVars' = None, geom=None, momentum=None):
 
-        mol = self.coupled_mol
+        if phase_vars is not None:
+            geom = phase_vars.nuc_q*BOHR_2_ANG
+        elif geom is not None:
+            #   legacy support for geom, assumed to be in angstroms
+            pass
+        else:
+            raise ValueError('Either phase_vars or geom must be provided')
+
+        
         self._position_history.append((self._n_steps, geom))
         self._momentum_history.append((self._n_steps, momentum))
 
-        #   Run TeraChem
-        if not TeraChem._DEBUG:
-            es_results = super().run_new_geom(geom=geom)
+        #   step 1
+        dipoles = np.arange(0, max(self._grads) + 1, dtype=int).tolist()
+        tr_dipoles = [(0, x) for x in range(1, max(self._grads) + 1)] + self._NACs
+        job_batch = self.create_jobs(geom, False, self._grads, self._NACs, dipoles, tr_dipoles)
+        input('Continue?')
+        job_batch = self._send_jobs_to_clients(job_batch)
+
+        #   step 2
+        if self._interpolate_grads or self._interpolate_NACs:
+            new_grads, new_nacs = self._check_new_grads_nacs_to_run(job_batch)
+            new_dipole_grads, new_tr_dipole_grads = self._check_new_dipole_grads_to_run(job_batch)
+            job_batch_2 = self.create_jobs(geom, False, new_nacs, new_grads, new_dipole_grads, new_tr_dipole_grads)
+            job_batch_2 = self._send_jobs_to_clients(job_batch_2)
+
+            #   step 3: combine both batches
+            job_batch.jobs += job_batch_2.jobs
+
+        self._log_jobs(job_batch, self._frame_counter)
+
+
+        # #   Run TeraChem
+        # if not TeraChem._DEBUG:
+        #     es_results = super().run_new_geom(geom=geom)
+        # else:
+        #     #   NOTE: BROKEN! This needs to be adjusted to use both a job_batch and an ESResults object
+        #     if not os.path.isfile('_ref_jobs.pkl'):
+        #         # job_batch = self.run_TC_new_geom(geom)
+        #         es_results = super().run_new_geom(geom=geom)
+        #         with open('_ref_jobs.pkl', 'wb') as file: 
+        #             pickle.dump(job_batch, file)
+        #     else:
+        #         with open('_ref_jobs.pkl', 'rb') as file:
+        #             # job_batch = pickle.load(file)
+        #             es_results = pickle.load(file)
+        #             # self._prev_jobs = job_batch.jobs
+        # job_batch: TCJobBatch = self._prev_job_batch
+
+        self.compute_coupled_mol_properties(job_batch)
+        self.log_timestep()
+        self.print_results()
+        self.set_pysces_outputs()
+        self._n_steps += 1
+        self.save_state()
+
+        return self.get_pysces_outputs()
+        
+    def _check_new_dipole_grads_to_run(self, job_batch: TCJobBatch):
+        if not self._run_dipole_derivative_interpolation:
+            return (), ()
         else:
-            #   NOTE: BROKEN! This needs to be adjusted to use both a job_batch and an ESResults object
-            if not os.path.isfile('_ref_jobs.pkl'):
-                # job_batch = self.run_TC_new_geom(geom)
-                es_results = super().run_new_geom(geom=geom)
-                with open('_ref_jobs.pkl', 'wb') as file: 
-                    pickle.dump(job_batch, file)
-            else:
-                with open('_ref_jobs.pkl', 'rb') as file:
-                    # job_batch = pickle.load(file)
-                    es_results = pickle.load(file)
-                    # self._prev_jobs = job_batch.jobs
-        job_batch: TCJobBatch = self._prev_job_batch
+            raise NotImplementedError('Interpolation of dipole gradients not yet implemented')
 
-        all_mol_energies = es_results.all_energies
-        mol.mol_energies = es_results.elecE
-        mol.mol_gradients = es_results.grads
-        mol.mol_NACs = es_results.nacs
-        mol_trans_dips = es_results.trans_dips
+    def compute_coupled_mol_properties(self, job_batch: TCJobBatch):
+        mol = self.coupled_mol
 
+        #   TODO: This part is a bit redundant, since _extract_results compress the results into the dimensions
+        #   specified in self._grads, but then we fill with zeros and expand again. A better solution would
+        #   be to have have functions like self.set_hamiltonian_gradient() handle the compressed results.
 
-        # all_mol_energies, mol.mol_energies, mol.mol_gradients, mol.mol_NACs, mol_trans_dips = TeraChem.format_output_LSCIVR(job_batch.results_list)        
+        # all_energies, elecE, grads_small, nacs_small, trans_dips, mu_deriv_matrix_small = self._extract_results(job_batch)
+        all_states = np.arange(0, max(self._grads) + 1)
+        all_energies, elecE, grads, nacs, trans_dips, mu_deriv_matrix = format_combo_job_results(job_batch.results_list, all_states)
 
-        self._tc_logger.set_next_dataset(job_batch)
+        #   correct for sign flips
+        sub_nacs = nacs[np.ix_(self._grads, self._grads)]
+        sub_trans_dips = trans_dips[np.ix_(self._grads, self._grads)]
         if self._n_steps == 0:
-            self._mol_sign_flipper.set_history(mol.mol_NACs, np.empty(0), mol_trans_dips, np.empty(0))
-        mol.mol_NACs.flags['WRITEABLE']=True
-        mol.mol_NACs = self._mol_sign_flipper.correct_nac_sign(mol.mol_NACs, mol_trans_dips)
+            self._mol_sign_flipper.set_history(sub_nacs, np.empty(0), sub_trans_dips, np.empty(0))
+        sub_nacs = self._mol_sign_flipper.correct_nac_sign(sub_nacs, sub_trans_dips)
 
+        #   TODO: split this into two functions
+        self._initialize_nac_sign(nacs)
+        self._finalize_frame(job_batch)
+
+        all_mol_energies = all_energies
+        mol.mol_energies = elecE
+        mol.mol_gradients = grads
+        mol.mol_NACs = nacs
+        mol.mol_dipole_matrix_gradient = mu_deriv_matrix
+        mol.mol_dipole_matrix = self.dipole_matrix_from_job(job_batch.jobs[-1])
 
         #   set hamiltonian, diagonalize, and compute needed gradients
-        hamiltonian = mol.set_hamiltonian(all_mol_energies, mol.mol_dipole_matrix)
+        mol.set_hamiltonian(all_mol_energies, mol.mol_dipole_matrix)
         mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
         mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
         mol.NA_coupling(mol.mol_NACs)
@@ -984,7 +1084,31 @@ class TCPolaritonRunner(TCRunner):
         mol.eigen_vector_gradient()
         self._prev_evecs = mol.eigen_vecs
 
+    def set_pysces_outputs(self):
+        #   TODO: Compute transition dipoles!!!
+        mol = self.coupled_mol
+        if 0 not in self.coupled_mol.mol_grad_indices:
+            out_eigen_vals = mol.eigen_vals[1:]
+            out_eigen_val_grads = mol.eigen_val_gradients[1:]
+            out_NACs = mol.NACs[1:, 1:]
+        else:
+            out_eigen_vals = mol.eigen_vals
+            out_eigen_val_grads = mol.eigen_val_gradients
+            out_NACs = mol.NACs
+
+
+        if self._rk4_inteprolation:
+            self._previous_pysces_outputs = None
+            raise NotImplementedError('RK4 interpolation not yet implemented')
+        else:
+            self._previous_pysces_outputs = (mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
+
+    def get_pysces_outputs(self):
+        return self._previous_pysces_outputs
+
+    def log_timestep(self):
         #   log all computed quantities
+        mol = self.coupled_mol
         logged_data = {}
         logged_data['hamiltonian'] = mol.hamiltonian
         logged_data['eigenvalues'] = mol.eigen_vals
@@ -995,27 +1119,6 @@ class TCPolaritonRunner(TCRunner):
         logged_data['dipole_matrix'] = mol.mol_dipole_matrix
         logged_data['dipole_matrix_grads'] = mol.mol_dipole_matrix_gradient
         self.polariton_logger.set_next_dataset(logged_data)
-
-        self.print_results()
-
-        #   TODO: Compute transition dipoles!!!
-
-        if 0 not in self.coupled_mol.mol_grad_indices:
-            out_eigen_vals = mol.eigen_vals[1:]
-            out_eigen_val_grads = mol.eigen_val_gradients[1:]
-            out_NACs = mol.NACs[1:, 1:]
-        else:
-            out_eigen_vals = mol.eigen_vals
-            out_eigen_val_grads = mol.eigen_val_gradients
-            out_NACs = mol.NACs
-
-        self._n_steps += 1
-        self.save_state()
-
-        if self._rk4_inteprolation:
-            return es_results
-        else:
-            return job_batch.timings, mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None
 
     def print_results(self):
         if self._print_level == 0:
@@ -1249,16 +1352,8 @@ class TCPolaritonRunner(TCRunner):
         '''
             Append job jets from the tc.out file. This requires the use of the TCParser repo.
         '''
-        if TCParser is None:
-            warnings.warn('TCParser could not be imported, please install TCParser')
-            return
-        
-        # with open(f'_{job.name}.txt', 'w') as file:
-        #     for line in job.results['tc.out']:
-        #         file.write(line + '\n')
-
     
-        job_data = TCParser().parse_from_list(job.results['tc.out'])
+        job_data = parse_from_list(job.results['tc.out']).model_dump(mode='json')
 
         for key in job_data:
             if key not in job.results:
