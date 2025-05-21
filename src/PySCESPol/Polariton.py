@@ -274,15 +274,27 @@ class CoupledMolecule(AdiabaticStates):
         self.mol_NACs = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3))
         self.mol_dipole_matrix = np.zeros((self._n_elec, self._n_elec, 3))
         self.mol_dipole_matrix_gradient = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3, 3))
-
-        # self.hamiltonian = np.zeros((self._n_dim, self._n_dim))
-        # self.e_vals = np.zeros(self._n_dim)
-        # self.e_vecs = np.zeros((self._n_dim, self._n_dim))
     
     def copy(self):
         new_copy = deepcopy(self)
         return new_copy
     
+    def compute_all(self, all_energies, grads, nacs, dipole_matrix, dipole_matrix_grads, ref_eig_vecs=None):
+        self.mol_energies = all_energies
+        self.mol_gradients = grads
+        self.mol_NACs = nacs
+        self.mol_dipole_matrix_gradient = dipole_matrix_grads
+        self.mol_dipole_matrix = dipole_matrix
+
+        #   set hamiltonian, diagonalize, and compute needed gradients
+        self.set_hamiltonian(all_energies, self.mol_dipole_matrix)
+        self.set_hamiltonian_gradient(self.mol_gradients, self.mol_dipole_matrix, self.mol_dipole_matrix_gradient)
+        self.diagonalize_H(ref_eig_vecs)
+        self.NA_coupling(self.mol_NACs)
+        self.eigen_value_gradient()
+        self.eigen_vector_gradient()
+
+
     def NA_coupling(self, mol_basis_NACs):
         basis_NACs = self.get_basis_NACs(mol_basis_NACs)
         return super().NA_coupling(basis_NACs)
@@ -630,7 +642,6 @@ class TCPolaritonRunner(TCRunner):
         self._mol_sign_flipper = SignFlipper(len(coupled_mol.mol_grad_indices), 2, coupled_mol.n_nuclei*3, 'MOL')
         self._pol_sign_flipper = SignFlipper(coupled_mol.n_states, 2, coupled_mol.n_nuclei*3, 'POL')
 
-        self._n_steps = 0
         self._momentum_history = deque(maxlen=50)
         self._position_history = deque(maxlen=50)
         self._dipole_matrix_history = deque(maxlen=50)
@@ -727,6 +738,11 @@ class TCPolaritonRunner(TCRunner):
     @property
     def tc_logger(self):
         return self._tc_logger
+    
+    @property
+    def _n_steps(self):
+        ''' Alias for the frame counter '''
+        return self._frame_counter
     
     def state_data_to_matrix(self, gs_data, ex_data, tr_data):
         '''
@@ -1012,31 +1028,12 @@ class TCPolaritonRunner(TCRunner):
             job_batch.jobs += job_batch_2.jobs
 
         self._log_jobs(job_batch, self._frame_counter)
-
-
-        # #   Run TeraChem
-        # if not TeraChem._DEBUG:
-        #     es_results = super().run_new_geom(geom=geom)
-        # else:
-        #     #   NOTE: BROKEN! This needs to be adjusted to use both a job_batch and an ESResults object
-        #     if not os.path.isfile('_ref_jobs.pkl'):
-        #         # job_batch = self.run_TC_new_geom(geom)
-        #         es_results = super().run_new_geom(geom=geom)
-        #         with open('_ref_jobs.pkl', 'wb') as file: 
-        #             pickle.dump(job_batch, file)
-        #     else:
-        #         with open('_ref_jobs.pkl', 'rb') as file:
-        #             # job_batch = pickle.load(file)
-        #             es_results = pickle.load(file)
-        #             # self._prev_jobs = job_batch.jobs
-        # job_batch: TCJobBatch = self._prev_job_batch
-
-        self.compute_coupled_mol_properties(job_batch)
+        self.compute_coupled_mol_properties(job_batch.results_list)
         self.log_timestep()
         self.print_results()
         self.set_pysces_outputs()
-        self._n_steps += 1
         self.save_state()
+        self._finalize_frame(job_batch)
 
         return self.get_pysces_outputs()
         
@@ -1046,43 +1043,27 @@ class TCPolaritonRunner(TCRunner):
         else:
             raise NotImplementedError('Interpolation of dipole gradients not yet implemented')
 
-    def compute_coupled_mol_properties(self, job_batch: TCJobBatch):
-        mol = self.coupled_mol
-
-        #   TODO: This part is a bit redundant, since _extract_results compress the results into the dimensions
-        #   specified in self._grads, but then we fill with zeros and expand again. A better solution would
-        #   be to have have functions like self.set_hamiltonian_gradient() handle the compressed results.
-
-        # all_energies, elecE, grads_small, nacs_small, trans_dips, mu_deriv_matrix_small = self._extract_results(job_batch)
-        all_states = np.arange(0, max(self._grads) + 1)
-        all_energies, elecE, grads, nacs, trans_dips, mu_deriv_matrix = format_combo_job_results(job_batch.results_list, all_states)
-
-        #   correct for sign flips
+    def _correct_nac_sign_flips(self, nacs, trans_dips):
         sub_nacs = nacs[np.ix_(self._grads, self._grads)]
         sub_trans_dips = trans_dips[np.ix_(self._grads, self._grads)]
         if self._n_steps == 0:
             self._mol_sign_flipper.set_history(sub_nacs, np.empty(0), sub_trans_dips, np.empty(0))
         sub_nacs = self._mol_sign_flipper.correct_nac_sign(sub_nacs, sub_trans_dips)
 
-        #   TODO: split this into two functions
         self._initialize_nac_sign(nacs)
-        self._finalize_frame(job_batch)
 
-        all_mol_energies = all_energies
-        mol.mol_energies = elecE
-        mol.mol_gradients = grads
-        mol.mol_NACs = nacs
-        mol.mol_dipole_matrix_gradient = mu_deriv_matrix
-        mol.mol_dipole_matrix = self.dipole_matrix_from_job(job_batch.jobs[-1])
+    def compute_coupled_mol_properties(self, results_list: list[dict]):
+        all_states = np.arange(0, max(self._grads) + 1)
+        all_energies, elecE, grads, nacs, trans_dips, dipole_matrix_grads = format_combo_job_results(results_list, all_states)
+        dipole_matrix = self.dipole_matrix_from_job(results_list[0])
 
-        #   set hamiltonian, diagonalize, and compute needed gradients
-        mol.set_hamiltonian(all_mol_energies, mol.mol_dipole_matrix)
-        mol.set_hamiltonian_gradient(mol.mol_gradients, mol.mol_dipole_matrix, mol.mol_dipole_matrix_gradient)
-        mol.diagonalize_H(ref_eig_vecs=self._prev_evecs)
-        mol.NA_coupling(mol.mol_NACs)
-        mol.eigen_value_gradient()
-        mol.eigen_vector_gradient()
-        self._prev_evecs = mol.eigen_vecs
+        #   correct for sign flips
+        self._correct_nac_sign_flips(nacs, trans_dips)
+
+        #   update the dipole matrixcompute all polariton properties
+        self.coupled_mol.compute_all(all_energies, grads, nacs, dipole_matrix, dipole_matrix_grads, self._prev_evecs)
+
+        self._prev_evecs = self.coupled_mol.eigen_vecs
 
     def set_pysces_outputs(self):
         #   TODO: Compute transition dipoles!!!
@@ -1359,13 +1340,14 @@ class TCPolaritonRunner(TCRunner):
             if key not in job.results:
                 job.results[key] = job_data[key]
 
-    def dipole_matrix_from_job(self, tc_job: TCJob):
+    # def dipole_matrix_from_job(self, tc_job: TCJob):
+    def dipole_matrix_from_job(self, tc_job_results: dict):
         '''
             re-order and combine all of the the dipoles from a TC job dict
             into a single matrix.
         '''
 
-        excited_type = tc_job.excited_type
+        excited_type = self._excited_type
         if excited_type == 'cis':
             dipole_key = 'cis_unrelaxed_dipoles'
             tr_dipole_key = 'cis_transition_dipoles'
@@ -1375,16 +1357,17 @@ class TCPolaritonRunner(TCRunner):
         else:
             raise ValueError(f"Invalid job type specified '{excited_type}'; must be 'cis' or 'cas'")
 
-        job_results = tc_job.results
-        n_states = len(job_results['energy'])
+        # job_results = tc_job.results
+        results = tc_job_results
+        n_states = len(results['energy'])
         dipole_matrix = np.zeros((n_states, n_states, 3))
-        dipole_matrix[0, 0] = np.array(job_results['dipole_vector'])*DEBYE_2_AU
+        dipole_matrix[0, 0] = np.array(results['dipole_vector'])*DEBYE_2_AU
         for i in range(1, n_states):
-            dipole_matrix[i, i] = job_results[dipole_key][i-1]
+            dipole_matrix[i, i] = results[dipole_key][i-1]
         indicies = np.transpose(np.triu_indices(n_states, k=+1))
         for count, (i, j) in enumerate(indicies):
-            dipole_matrix[i, j] = job_results[tr_dipole_key][count]
-            dipole_matrix[j, i] = job_results[tr_dipole_key][count]
+            dipole_matrix[i, j] = results[tr_dipole_key][count]
+            dipole_matrix[j, i] = results[tr_dipole_key][count]
 
         return dipole_matrix
     
