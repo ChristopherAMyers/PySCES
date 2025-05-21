@@ -80,6 +80,9 @@ class SignFlipperProxy(Proxy):
         obj.n_dof = data['n_dof']
         obj.name = data['name']
 
+class CoupledMoleculeProxy(Proxy):
+    pass
+
 class DipoleMatrixTrackerProxy(Proxy):
     def __init__(self, obj: DipoleMatrixTracker) -> None:
         self.obj = obj

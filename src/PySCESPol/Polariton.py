@@ -789,7 +789,8 @@ class TCPolaritonRunner(TCRunner):
     def _send_jobs_to_clients(self, jobs_batch: TCJobBatch):
         ''' Overwrite the send jobs to clients method to add the dipole derivatives options '''
         
-        return super()._send_jobs_to_clients(jobs_batch)
+        if not self._interpolation:
+            return super()._send_jobs_to_clients(jobs_batch)
 
         ''' need to fix the remaining'''
 
@@ -1054,11 +1055,10 @@ class TCPolaritonRunner(TCRunner):
 
     def compute_coupled_mol_properties(self, results_list: list[dict]):
         all_states = np.arange(0, max(self._grads) + 1)
-        all_energies, elecE, grads, nacs, trans_dips, dipole_matrix_grads = format_combo_job_results(results_list, all_states)
-        dipole_matrix = self.dipole_matrix_from_job(results_list[0])
+        all_energies, elecE, grads, nacs, dipole_matrix, dipole_matrix_grads = format_combo_job_results(results_list, all_states)
 
         #   correct for sign flips
-        self._correct_nac_sign_flips(nacs, trans_dips)
+        self._correct_nac_sign_flips(nacs, dipole_matrix)
 
         #   update the dipole matrixcompute all polariton properties
         self.coupled_mol.compute_all(all_energies, grads, nacs, dipole_matrix, dipole_matrix_grads, self._prev_evecs)
