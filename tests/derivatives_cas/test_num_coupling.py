@@ -66,7 +66,7 @@ mol_overlaps = np.array([num_overlap_data[str(i+1)]['ci_overlap'] for i in range
 
 #   diagonalize reference job
 dipoles_ref = runner.dipole_matrix_from_job(ref_job)
-ref_ham = ref_coupled.set_hamiltonian(ref_energies, dipoles_ref)
+ref_ham = ref_coupled.set_hamiltonian_PF(ref_energies, dipoles_ref)
 ref_evals, ref_evecs = ref_coupled.diagonalize_H()
 
 #   run numerical derivatives and keep a copy of the coupled molecule

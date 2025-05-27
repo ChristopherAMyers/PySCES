@@ -77,12 +77,6 @@ class AdiabaticStates():
         self.eigen_vecs = np.zeros((n_states, n_states))
         self._hamiltonian = np.zeros((n_states, n_states))
 
-        #   should move these to CoupledMolecule
-        self._H_d = np.zeros((n_states, n_states))
-        self._H_en_p = np.zeros((n_states, n_states))
-        self._H_p = np.zeros((n_states, n_states))
-        self._H_en = np.zeros((n_states, n_states))
-
         self._dH = np.zeros((n_states, n_states, n_nuclei*3))
         self.NACs = np.zeros((n_states, n_states, n_nuclei*3))
         self.eigen_val_gradients = np.zeros((n_states, n_nuclei*3))
@@ -274,6 +268,14 @@ class CoupledMolecule(AdiabaticStates):
         self.mol_NACs = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3))
         self.mol_dipole_matrix = np.zeros((self._n_elec, self._n_elec, 3))
         self.mol_dipole_matrix_gradient = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3, 3))
+
+        #   internal components used to store the hamiltonian
+        self._H_d = np.zeros_like(self._hamiltonian)
+        self._H_en_p = np.zeros_like(self._hamiltonian)
+        self._H_p = np.zeros_like(self._hamiltonian)
+        self._H_en = np.zeros_like(self._hamiltonian)
+        self._used_DSE = False # dipole self energy
+
     
     def copy(self):
         new_copy = deepcopy(self)
@@ -287,7 +289,7 @@ class CoupledMolecule(AdiabaticStates):
         self.mol_dipole_matrix = dipole_matrix
 
         #   set hamiltonian, diagonalize, and compute needed gradients
-        self.set_hamiltonian(all_energies, self.mol_dipole_matrix)
+        self.set_hamiltonian_PF(all_energies, self.mol_dipole_matrix)
         self.set_hamiltonian_gradient(self.mol_gradients, self.mol_dipole_matrix, self.mol_dipole_matrix_gradient)
         self.diagonalize_H(ref_eig_vecs)
         self.NA_coupling(self.mol_NACs)
@@ -299,9 +301,9 @@ class CoupledMolecule(AdiabaticStates):
         basis_NACs = self.get_basis_NACs(mol_basis_NACs)
         return super().NA_coupling(basis_NACs)
 
-    def set_hamiltonian(self, energies, dipole_matrix):
+    def set_hamiltonian_PF(self, energies, dipole_matrix, dse=True):
         '''
-            Evaluate the Hamiltonian elements
+            Evaluate the Pauli-Ferz Hamiltonian elements
 
             Parameters
             ----------
@@ -327,11 +329,17 @@ class CoupledMolecule(AdiabaticStates):
                 for b in range(n_elec):
                     mu_dot_field[a, b] = np.linalg.norm(dipole_matrix[a, b])
                     
+        #   dipole self energy
         dipole_self = np.zeros((n_elec, n_elec))
-        for a in range(n_elec):
-            for b in range(n_elec):
-                for gamma in range(n_elec):
-                    dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
+        if dse:
+            self._used_DSE = True
+            dipole_self = np.zeros((n_elec, n_elec))
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for gamma in range(n_elec):
+                        dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
+        else:
+            self._used_DSE = False
 
         H_t = np.zeros((self._n_dim, self._n_dim))
         delta = np.eye(self._n_dim)
@@ -346,6 +354,81 @@ class CoupledMolecule(AdiabaticStates):
                 H_d = dipole_self[a, b]*delta[m, n]
 
                 H_t[i, j] = H_en + H_p + H_en_p + H_d
+                self._H_en[i, j] = H_en
+                self._H_p[i, j] = H_p
+                self._H_en_p[i, j] = H_en_p
+                self._H_d[i, j] = H_d
+
+        self.mol_energies = energies
+        self.mol_dipole_matrix = dipole_matrix
+        self.hamiltonian = H_t
+        return H_t
+    
+    def set_hamiltonian_RWA(self, energies, dipole_matrix, dse=True):
+        '''
+            Evaluate the Jaynes-Cummings Hamiltonian elements
+
+            Parameters
+            ----------
+            energies: np.ndarray
+                diagonal components of the hamiltonian
+            dipole_matrix: np.ndarray (n_states x n_states)
+                Dipole matrix with diagonal elemnts being the dipoles of each
+                state and the off-diagonal elements being the transition dipoles
+        '''
+        n_elec = self._n_elec
+
+        mu_dot_field = np.zeros((n_elec, n_elec))
+        if self._field_dir is not None:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    mu_dot_field[a, b] = np.dot(dipole_matrix[a, b], self._field_dir)
+        else:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    mu_dot_field[a, b] = np.linalg.norm(dipole_matrix[a, b])
+
+        #   dipole self energy
+        dipole_self = np.zeros((n_elec, n_elec))
+        if dse:
+            self._used_DSE = True
+            dipole_self = np.zeros((n_elec, n_elec))
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for gamma in range(n_elec):
+                        dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
+        else:
+            self._used_DSE = False
+        
+        #   re-organize the states by "total" excitation
+        # excitations = {}
+        # for a, n in self.state_pairs:
+        #     total = int((a > 0) + n)
+        #     if total not in excitations:
+        #         excitations[total] = []
+        #     excitations[total].append((a, n))
+        
+        H_t = np.zeros((self._n_dim, self._n_dim))
+        # for pair in excitations.values():
+        delta = np.eye(self._n_dim)
+        for i, state_i in enumerate(self.state_pairs):
+            for j, state_j in enumerate(self.state_pairs):
+                a, m = state_i
+                b, n = state_j
+
+                H_en = energies[a]*delta[a, b]*delta[m, n]
+                H_p = self.omega_c*(n + 0/2)*delta[a, b]*delta[m, n]
+                H_d = dipole_self[a, b]*delta[m, n]
+                # print(H_d)
+
+                if a < b:
+                    H_en_p = self.gc * mu_dot_field[a, b] * sqrt(n+1)*delta[m, n+1]
+                elif a > b:
+                    H_en_p = self.gc * mu_dot_field[a, b] * sqrt(n)*delta[m, n-1]
+                else:
+                    H_en_p = 0.0
+
+                H_t[i, j] = H_en + H_p + H_en_p
                 self._H_en[i, j] = H_en
                 self._H_p[i, j] = H_p
                 self._H_en_p[i, j] = H_en_p
@@ -1258,7 +1341,7 @@ class TCPolaritonRunner(TCRunner):
 
         #   diagonalize reference hamiltonian, their eigenvectors will be used as a reference
         ref_dipoles = self.dipole_matrix_from_job(ref_job)
-        mol.set_hamiltonian(ref_energies, ref_dipoles)
+        mol.set_hamiltonian_PF(ref_energies, ref_dipoles)
         mol.diagonalize_H()
 
         #   each coupled AdibaticState is computed for each numerical job
@@ -1269,7 +1352,7 @@ class TCPolaritonRunner(TCRunner):
             coupled = mol.copy()
             energies = num_deriv_jobs[i].results['energy']
             dipoles = self.dipole_matrix_from_job(num_deriv_jobs[i])
-            coupled.set_hamiltonian(energies, dipoles)
+            coupled.set_hamiltonian_PF(energies, dipoles)
             coupled.diagonalize_H(mol.eigen_vecs)
             all_energies.append(energies)
             states.append(coupled)
