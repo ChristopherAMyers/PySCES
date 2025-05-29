@@ -236,7 +236,7 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None, RWA=False, DSE=True) -> None:
+    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None, rwa=False, dse=True) -> None:
         # n_elec = s_high - s_low + 1
         # if s_high < s_low:
         #     raise ValueError('s_high must be greater than or equal to s_low')
@@ -277,8 +277,8 @@ class CoupledMolecule(AdiabaticStates):
         self._H_en_p = np.zeros_like(self._hamiltonian)
         self._H_p = np.zeros_like(self._hamiltonian)
         self._H_en = np.zeros_like(self._hamiltonian)
-        self._use_DSE = DSE # dipole self energy
-        self._use_RWA = RWA # use the rotating wave approximation
+        self._use_DSE = dse # dipole self energy
+        self._use_RWA = rwa # use the rotating wave approximation
 
     
     def copy(self):
