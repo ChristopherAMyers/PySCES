@@ -66,7 +66,7 @@ mol_overlaps = np.array([num_overlap_data[str(i+1)]['ci_overlap'] for i in range
 
 #   diagonalize reference job
 dipoles_ref = runner.dipole_matrix_from_job(ref_job)
-ref_ham = ref_coupled.set_hamiltonian_PF(ref_energies, dipoles_ref)
+ref_ham = ref_coupled.set_hamiltonian(ref_energies, dipoles_ref)
 ref_evals, ref_evecs = ref_coupled.diagonalize_H()
 
 #   run numerical derivatives and keep a copy of the coupled molecule
@@ -78,9 +78,9 @@ tst_coupled = ref_coupled.copy()
 #   we use the numerical dipole derivatives for the reference calculations
 ref_dipole_deriv_matrix = tst_coupled.mol_dipole_matrix_gradient
 ref_dH =                ref_coupled.set_hamiltonian_gradient(ref_gradients, dipoles_ref, ref_dipole_deriv_matrix) # TODO: use actual gradients
-ref_pol_coupling =      ref_coupled.NA_coupling(ref_mol_coupling)
-ref_eval_gradients =    ref_coupled.eigen_value_gradient()
-ref_evec_gradients =    ref_coupled.eigen_vector_gradient()
+ref_pol_coupling =      ref_coupled.calc_NA_coupling(ref_mol_coupling)
+ref_eval_gradients =    ref_coupled.calc_eigen_value_gradient()
+ref_evec_gradients =    ref_coupled.calc_eigen_vector_gradient()
 
 #   gather maximum deviation statistics and print results
 print_arrays = False

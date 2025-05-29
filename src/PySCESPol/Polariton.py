@@ -145,13 +145,16 @@ class AdiabaticStates():
 
         return self.eigen_vals, self.eigen_vecs
     
-    def eigen_value_gradient(self):
+    def calc_eigen_value_gradient(self):
         C_mu_i = self.eigen_vecs
         self.eigen_val_gradients = np.einsum('mi,mnk,ni->ik', C_mu_i, self.dH, C_mu_i)
         self.eigen_val_gradients.flags['WRITEABLE'] = False
         return self.eigen_val_gradients
     
-    def eigen_vector_gradient(self):
+    def calc_eigen_vector_gradient(self):
+        '''
+            this function is teribly slow. Need to optimize and compare einsum methods
+        '''
         e_vec_grads = np.zeros((self._n_states, self._n_states, self._n_nuclei*3))
         for s in range(self._n_states):
             for i, E_i in enumerate(self.eigen_vals):
@@ -171,7 +174,7 @@ class AdiabaticStates():
         self.eigen_vec_gradients.flags['WRITEABLE'] = False
         return self.eigen_vec_gradients
     
-    def NA_coupling(self, basis_NACs):
+    def calc_NA_coupling(self, basis_NACs):
         #   use this basis NACS in the calcualtion of the coupling in the polariton basis
         couplings = np.zeros((self._n_states, self._n_states, self._n_nuclei*3))
         for i, E_i in enumerate(self.eigen_vals):
@@ -233,7 +236,7 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None) -> None:
+    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None, RWA=False, DSE=True) -> None:
         # n_elec = s_high - s_low + 1
         # if s_high < s_low:
         #     raise ValueError('s_high must be greater than or equal to s_low')
@@ -274,7 +277,8 @@ class CoupledMolecule(AdiabaticStates):
         self._H_en_p = np.zeros_like(self._hamiltonian)
         self._H_p = np.zeros_like(self._hamiltonian)
         self._H_en = np.zeros_like(self._hamiltonian)
-        self._used_DSE = False # dipole self energy
+        self._use_DSE = DSE # dipole self energy
+        self._use_RWA = RWA # use the rotating wave approximation
 
     
     def copy(self):
@@ -289,19 +293,25 @@ class CoupledMolecule(AdiabaticStates):
         self.mol_dipole_matrix = dipole_matrix
 
         #   set hamiltonian, diagonalize, and compute needed gradients
-        self.set_hamiltonian_PF(all_energies, self.mol_dipole_matrix)
+        self.set_hamiltonian(all_energies, self.mol_dipole_matrix)
         self.set_hamiltonian_gradient(self.mol_gradients, self.mol_dipole_matrix, self.mol_dipole_matrix_gradient)
         self.diagonalize_H(ref_eig_vecs)
-        self.NA_coupling(self.mol_NACs)
-        self.eigen_value_gradient()
-        self.eigen_vector_gradient()
+        self.calc_NA_coupling(self.mol_NACs)
+        self.calc_eigen_value_gradient()
+        # self.calc_eigen_vector_gradient()
 
 
-    def NA_coupling(self, mol_basis_NACs):
+    def calc_NA_coupling(self, mol_basis_NACs):
         basis_NACs = self.get_basis_NACs(mol_basis_NACs)
-        return super().NA_coupling(basis_NACs)
+        return super().calc_NA_coupling(basis_NACs)
 
-    def set_hamiltonian_PF(self, energies, dipole_matrix, dse=True):
+    def set_hamiltonian(self, energies, dipole_matrix):
+        if not self._use_RWA:
+            return self._set_hamiltonian_PF(energies, dipole_matrix)
+        else:
+            return self._set_hamiltonian_RWA(energies, dipole_matrix)
+
+    def _set_hamiltonian_PF(self, energies, dipole_matrix):
         '''
             Evaluate the Pauli-Ferz Hamiltonian elements
 
@@ -331,15 +341,12 @@ class CoupledMolecule(AdiabaticStates):
                     
         #   dipole self energy
         dipole_self = np.zeros((n_elec, n_elec))
-        if dse:
-            self._used_DSE = True
+        if self._use_DSE:
             dipole_self = np.zeros((n_elec, n_elec))
             for a in range(n_elec):
                 for b in range(n_elec):
                     for gamma in range(n_elec):
                         dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
-        else:
-            self._used_DSE = False
 
         H_t = np.zeros((self._n_dim, self._n_dim))
         delta = np.eye(self._n_dim)
@@ -364,7 +371,7 @@ class CoupledMolecule(AdiabaticStates):
         self.hamiltonian = H_t
         return H_t
     
-    def set_hamiltonian_RWA(self, energies, dipole_matrix, dse=True):
+    def _set_hamiltonian_RWA(self, energies, dipole_matrix):
         '''
             Evaluate the Jaynes-Cummings Hamiltonian elements
 
@@ -390,15 +397,12 @@ class CoupledMolecule(AdiabaticStates):
 
         #   dipole self energy
         dipole_self = np.zeros((n_elec, n_elec))
-        if dse:
-            self._used_DSE = True
+        if self._use_DSE:
             dipole_self = np.zeros((n_elec, n_elec))
             for a in range(n_elec):
                 for b in range(n_elec):
                     for gamma in range(n_elec):
                         dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
-        else:
-            self._used_DSE = False
         
         #   re-organize the states by "total" excitation
         # excitations = {}
@@ -440,6 +444,12 @@ class CoupledMolecule(AdiabaticStates):
         return H_t
     
     def set_hamiltonian_gradient(self, gradients, dipoles, dipole_grads):
+        if not self._use_RWA:
+            return self._set_hamiltonian_gradient_PF(gradients, dipoles, dipole_grads)
+        else:
+            return self._set_hamiltonian_gradient_RWA(gradients, dipoles, dipole_grads)
+
+    def _set_hamiltonian_gradient_PF(self, gradients, dipoles, dipole_grads):
         '''
             Parameters
             ----------
@@ -454,7 +464,6 @@ class CoupledMolecule(AdiabaticStates):
         #     full_grads[idx] = gradients[i]
 
         full_grads = np.copy(gradients)
-
 
         n_elec = self._n_elec
 
@@ -481,14 +490,16 @@ class CoupledMolecule(AdiabaticStates):
                     
         #   gradient of the dipole self energy
         dipole_self_grad = np.zeros((n_elec, n_elec, self.n_nuclei*3))
-        pre_factor = self.gc**2/self.omega_c
-        for a in range(n_elec):
-            for b in range(n_elec):
-                for nuc in range(self.n_nuclei*3):
-                    for gamma in range(n_elec):
-                        term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
-                        term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
-                        dipole_self_grad[a, b, nuc] += term1 + term2
+
+        if self._use_DSE:
+            pre_factor = self.gc**2/self.omega_c
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for nuc in range(self.n_nuclei*3):
+                        for gamma in range(n_elec):
+                            term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
+                            term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
+                            dipole_self_grad[a, b, nuc] += term1 + term2
 
 
         #   now form the gradient of the Hamiltonian matrix
@@ -501,8 +512,90 @@ class CoupledMolecule(AdiabaticStates):
                 for nuc in range(self.n_nuclei*3):
                     dH_en = full_grads[a, nuc]*delta[a, b]*delta[m, n]
                     dH_p = 0.0
-                    dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
                     dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
+                    dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
+
+                    dH[i, j, nuc] = dH_en + dH_p + dH_en_p + dH_d
+
+
+        self.mol_gradients = gradients
+        self.mol_dipole_matrix_gradient = dipole_grads
+        self.dH = dH
+        return dH
+    
+    def _set_hamiltonian_gradient_RWA(self, gradients, dipoles, dipole_grads):
+        '''
+            Parameters
+            ----------
+            gradients: (M_states, N_atoms) array
+            dipoles: (M_states, M_states, 3) array
+            dipole_grads: (M_states, M_states, N_atoms*3, 3) array
+        '''
+
+        # full_grads = np.zeros((self._n_elec, self.n_nuclei*3))
+        # for i, idx in enumerate(self.mol_grad_indices):
+        #     print('assigning grads: ', i, idx)
+        #     full_grads[idx] = gradients[i]
+
+        full_grads = np.copy(gradients)
+
+        n_elec = self._n_elec
+
+        mu_dot_field = np.zeros((n_elec, n_elec))
+        grad_mu_dot_field = np.zeros((n_elec, n_elec, self.n_nuclei*3))
+        dH = np.zeros((self._n_dim, self._n_dim, self.n_nuclei*3))
+
+        #   dipole dotted with electric field directions
+        if self._field_dir is not None:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    mu_dot_field[a, b] = np.dot(dipoles[a, b], self._field_dir)
+                    for nuc in range(self.n_nuclei*3):
+                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], self._field_dir)
+                        
+        #   Or, we assume that the field is always in the same direction as the dipole moments 
+        else:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    field = dipoles[a, b]/np.linalg.norm(dipoles[a, b])
+                    mu_dot_field[a, b] = np.linalg.norm(dipoles[a, b])
+                    for nuc in range(self.n_nuclei*3):
+                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
+                    
+        #   gradient of the dipole self energy
+        dipole_self_grad = np.zeros((n_elec, n_elec, self.n_nuclei*3))
+
+        if self._use_DSE:
+            pre_factor = self.gc**2/self.omega_c
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for nuc in range(self.n_nuclei*3):
+                        for gamma in range(n_elec):
+                            term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
+                            term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
+                            dipole_self_grad[a, b, nuc] += term1 + term2
+
+
+        #   now form the gradient of the Hamiltonian matrix
+        delta = np.eye(self._n_dim)
+        for i, state_i in enumerate(self.state_pairs):
+            for j, state_j in enumerate(self.state_pairs):
+                a, m = state_i
+                b, n = state_j
+
+                for nuc in range(self.n_nuclei*3):
+                    dH_en = full_grads[a, nuc]*delta[a, b]*delta[m, n]
+                    dH_p = 0.0
+                    dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
+
+                    if a < b:
+                        dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * sqrt(n+1)*delta[m, n+1]
+                    elif a > b:
+                        dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * sqrt(n)*delta[m, n-1]
+                    else:
+                        dH_en_p = 0.0
+
+                    dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
 
                     dH[i, j, nuc] = dH_en + dH_p + dH_en_p + dH_d
 
@@ -1341,7 +1434,7 @@ class TCPolaritonRunner(TCRunner):
 
         #   diagonalize reference hamiltonian, their eigenvectors will be used as a reference
         ref_dipoles = self.dipole_matrix_from_job(ref_job)
-        mol.set_hamiltonian_PF(ref_energies, ref_dipoles)
+        mol.set_hamiltonian(ref_energies, ref_dipoles)
         mol.diagonalize_H()
 
         #   each coupled AdibaticState is computed for each numerical job
@@ -1352,7 +1445,7 @@ class TCPolaritonRunner(TCRunner):
             coupled = mol.copy()
             energies = num_deriv_jobs[i].results['energy']
             dipoles = self.dipole_matrix_from_job(num_deriv_jobs[i])
-            coupled.set_hamiltonian_PF(energies, dipoles)
+            coupled.set_hamiltonian(energies, dipoles)
             coupled.diagonalize_H(mol.eigen_vecs)
             all_energies.append(energies)
             states.append(coupled)
