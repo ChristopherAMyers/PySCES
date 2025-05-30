@@ -153,7 +153,31 @@ class AdiabaticStates():
     
     def calc_eigen_vector_gradient(self):
         '''
-            this function is teribly slow. Need to optimize and compare einsum methods
+            Compute the gradients of the eigenvectors with respect to the nuclear coordinates.
+
+            Returns
+            -------
+            e_vec_grads: np.ndarray (n_states, n_states, 3*n_nuclei)
+        '''
+
+        e_vec_grads = np.zeros((self._n_states, self._n_states, self._n_nuclei*3))
+        for i, E_i in enumerate(self.eigen_vals):
+            C_i = self.eigen_vecs[:, i]
+            for j, E_j in enumerate(self.eigen_vals):
+                C_j = self.eigen_vecs[:, j]
+                if i == j: continue
+                inverse_energies = 1/(E_i - E_j)
+                C_dH_C = np.einsum('i,ijk,j->k', C_j, self.dH, C_i)
+                e_vec_grads[:, i] += inverse_energies * C_dH_C * C_j[:, None]
+
+        self.eigen_vec_gradients = e_vec_grads
+        self.eigen_vec_gradients.flags['WRITEABLE'] = False
+        return self.eigen_vec_gradients
+
+    def _calc_eigen_vector_gradient_reference(self):
+        '''
+            This function is teribly slow. Only kep for reference.
+            Use calc_eigen_vector_gradient() instead.
         '''
         e_vec_grads = np.zeros((self._n_states, self._n_states, self._n_nuclei*3))
         for s in range(self._n_states):
@@ -163,9 +187,6 @@ class AdiabaticStates():
                     C_j = self.eigen_vecs[:, j]
                     if i == j: continue
                     inverse_energies = 1/(E_i - E_j)
-                    C_dH_C = np.einsum('i,ijk,j->k', C_j, self.dH, C_i)
-                    # e_vec_grads[:, i] += inverse_energies * C_dH_C * C_j[:, None]
-
                     for nuc in range(self._n_nuclei*3):
                         e_vec_grads[s, i, nuc] += inverse_energies * np.dot(C_j, np.dot(self.dH[:, :, nuc], C_i))*C_j[s]
 
@@ -298,7 +319,8 @@ class CoupledMolecule(AdiabaticStates):
         self.diagonalize_H(ref_eig_vecs)
         self.calc_NA_coupling(self.mol_NACs)
         self.calc_eigen_value_gradient()
-        # self.calc_eigen_vector_gradient()
+        self.calc_eigen_vector_gradient()
+        # self._calc_eigen_vector_gradient_reference()
 
 
     def calc_NA_coupling(self, mol_basis_NACs):

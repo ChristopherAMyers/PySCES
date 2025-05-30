@@ -68,6 +68,7 @@ class HamiltonianVersions(unittest.TestCase):
                     'eigenvalues': mol.eigen_vals,
                     'eigenvectors': mol.eigen_vecs,
                     'eigenvalue_grads': mol.eigen_val_gradients,
+                    'eigenvector_grads': mol.eigen_vec_gradients,
                     'NACs': mol.NACs,
                     'dipole_matrix': mol.mol_dipole_matrix,
                     'dipole_matrix_grads': mol.mol_dipole_matrix_gradient
@@ -81,6 +82,7 @@ class HamiltonianVersions(unittest.TestCase):
         np.testing.assert_allclose(ref_data['eigenvalues'], mol.eigen_vals, atol=1e-6, verbose=True, err_msg='key: eigenvalues')
         np.testing.assert_allclose(ref_data['eigenvectors'], mol.eigen_vecs, atol=1e-5, verbose=True, err_msg='key: eigenvectors')
         np.testing.assert_allclose(ref_data['eigenvalue_grads'], mol.eigen_val_gradients, atol=1e-6, verbose=True, err_msg='key: eigenvalue_grads')
+        np.testing.assert_allclose(ref_data['eigenvector_grads'], mol.eigen_vec_gradients, atol=1e-6, verbose=True, err_msg='key: eigenvector_grads')
         np.testing.assert_allclose(ref_data['NACs'], mol.NACs, atol=1e-3, verbose=True, err_msg='key: NACs')
         np.testing.assert_allclose(ref_data['dipole_matrix'], mol.mol_dipole_matrix, atol=1e-3, verbose=True, err_msg='key: dipole_matrix')
         np.testing.assert_allclose(ref_data['dipole_matrix_grads'], mol.mol_dipole_matrix_gradient, atol=1e-6, verbose=True, err_msg='key: dipole_matrix_grads')
