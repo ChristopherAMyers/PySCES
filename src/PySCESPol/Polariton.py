@@ -176,7 +176,7 @@ class AdiabaticStates():
 
     def _calc_eigen_vector_gradient_reference(self):
         '''
-            This function is teribly slow. Only kep for reference.
+            This function is teribly slow. Only kept for reference.
             Use calc_eigen_vector_gradient() instead.
         '''
         e_vec_grads = np.zeros((self._n_states, self._n_states, self._n_nuclei*3))
@@ -392,16 +392,16 @@ class CoupledMolecule(AdiabaticStates):
         if self._field_dir is not None:
             for a in range(n_elec):
                 for b in range(n_elec):
-                    for nuc in range(self.n_nuclei*3):
-                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], self._field_dir)
+                    grad_mu_dot_field[a, b] = np.einsum('ij,j->i', dipole_grads[a, b], self._field_dir)
                         
         #   Or, we assume that the field is always in the same direction as the dipole moments 
         else:
             for a in range(n_elec):
                 for b in range(n_elec):
                     field = dipole_matrix[a, b]/np.linalg.norm(dipole_matrix[a, b])
-                    for nuc in range(self.n_nuclei*3):
-                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
+                    grad_mu_dot_field[a, b] = np.einsum('ij,j->i', dipole_grads[a, b], field)
+                    # for nuc in range(self.n_nuclei*3):
+                    #     grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
 
         return grad_mu_dot_field
     
@@ -426,11 +426,10 @@ class CoupledMolecule(AdiabaticStates):
             pre_factor = self.gc**2/self.omega_c
             for a in range(n_elec):
                 for b in range(n_elec):
-                    for nuc in range(self.n_nuclei*3):
-                        for gamma in range(n_elec):
-                            term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
-                            term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
-                            dipole_self_grad[a, b, nuc] += term1 + term2
+                    for gamma in range(n_elec):
+                        term1 = pre_factor * grad_mu_dot_field[a, gamma, :] * mu_dot_field[gamma, b]
+                        term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, :]
+                        dipole_self_grad[a, b, :] += term1 + term2
         return dipole_self_grad
 
     def set_hamiltonian(self, energies, dipole_matrix):
@@ -574,13 +573,11 @@ class CoupledMolecule(AdiabaticStates):
                 a, m = state_i
                 b, n = state_j
 
-                for nuc in range(self.n_nuclei*3):
-                    dH_en = gradients[a, nuc]*delta[a, b]*delta[m, n]
-                    dH_p = 0.0
-                    dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
-                    dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
-
-                    dH[i, j, nuc] = dH_en + dH_p + dH_en_p + dH_d
+                dH_en = gradients[a, :]*delta[a, b]*delta[m, n]
+                dH_d = dipole_self_grad[a, b, :]*delta[m, n]
+                dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
+                dH_p = 0.0
+                dH[i, j] = dH_en + dH_p + dH_en_p + dH_d
 
 
         self.mol_gradients = gradients
@@ -597,11 +594,6 @@ class CoupledMolecule(AdiabaticStates):
             dipole_grads: (M_states, M_states, N_atoms*3, 3) array
         '''
 
-        # full_grads = np.zeros((self._n_elec, self.n_nuclei*3))
-        # for i, idx in enumerate(self.mol_grad_indices):
-        #     print('assigning grads: ', i, idx)
-        #     full_grads[idx] = gradients[i]
-
         mu_dot_field = self._calc_mu_dot_field(dipoles)
         grad_mu_dot_field = self._calc_grad_mu_dot_field(dipoles, dipole_grads)
         dipole_self_grad = self._calc_grad_dipole_self_energy(mu_dot_field, grad_mu_dot_field)
@@ -614,21 +606,20 @@ class CoupledMolecule(AdiabaticStates):
                 a, m = state_i
                 b, n = state_j
 
-                for nuc in range(self.n_nuclei*3):
-                    dH_en = gradients[a, nuc]*delta[a, b]*delta[m, n]
-                    dH_p = 0.0
-                    dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
+                dH_en = gradients[a, :]*delta[a, b]*delta[m, n]
+                dH_p = 0.0
+                dH_d = dipole_self_grad[a, b, :]*delta[m, n]
 
-                    if a < b:
-                        dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * sqrt(n+1)*delta[m, n+1]
-                    elif a > b:
-                        dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * sqrt(n)*delta[m, n-1]
-                    else:
-                        dH_en_p = 0.0
+                if a < b:
+                    dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * sqrt(n+1)*delta[m, n+1]
+                elif a > b:
+                    dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * sqrt(n)*delta[m, n-1]
+                else:
+                    dH_en_p = 0.0
 
-                    dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
+                dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
 
-                    dH[i, j, nuc] = dH_en + dH_p + dH_en_p + dH_d
+                dH[i, j, :] = dH_en + dH_p + dH_en_p + dH_d
 
 
         self.mol_gradients = gradients
