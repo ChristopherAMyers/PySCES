@@ -15,7 +15,7 @@ from pysces.h5file import H5File
 from PySCESPol.Polariton import CoupledMolecule, format_combo_job_results
 
 EV_2_AU = 1/27.2114079527
-_SAVE_RESULTS = True
+_SAVE_RESULTS = False
 
 class HamiltonianVersions(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:

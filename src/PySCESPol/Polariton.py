@@ -305,7 +305,125 @@ class CoupledMolecule(AdiabaticStates):
         basis_NACs = self.get_basis_NACs(mol_basis_NACs)
         return super().calc_NA_coupling(basis_NACs)
 
+    def _calc_mu_dot_field(self, dipole_matrix):
+        '''
+            Parameters
+            ----------
+            dipole_matrix: np.ndarray (n_elec x n_elec x 3)
+                Dipole matrix with diagonal elemnts being the dipoles of each
+                state and the off-diagonal elements being the transition dipoles
+
+            Returns
+            -------
+            mu_dot_field: np.ndarray (n_elec x n_elec)
+        '''
+        n_elec = self._n_elec
+        mu_dot_field = np.zeros((n_elec, n_elec))
+        if self._field_dir is not None:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    mu_dot_field[a, b] = np.dot(dipole_matrix[a, b], self._field_dir)
+        else:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    mu_dot_field[a, b] = np.linalg.norm(dipole_matrix[a, b])
+
+        return mu_dot_field
+
+    def _calc_dipole_self_energy(self, mu_dot_field):
+        '''
+            Parameters
+            ----------
+            mu_dot_field: np.ndarray (n_elec x n_elec)
+                Dipole matrix dotted with the electric field direction
+                or the norm of the dipole matrix if no field direction is provided.
+                Computed in _calc_mu_dot_field() method
+
+            Returns
+            -------
+            dipole_self: np.ndarray (n_elec x n_elec)
+        '''
+        n_elec = self._n_elec
+        dipole_self = np.zeros((n_elec, n_elec))
+        if self._use_DSE:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for gamma in range(n_elec):
+                        dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
+        return dipole_self
+
+    def _calc_grad_mu_dot_field(self, dipole_matrix, dipole_grads):
+        '''
+            Parameters
+            ----------
+            dipole_grads: np.ndarray (n_elec x n_elec x 3*n_nuc, 3)
+                Dipole matrix with diagonal elemnts being the dipoles of each
+                state and the off-diagonal elements being the transition dipoles
+
+            Returns
+            -------
+            grad_mu_dot_field: np.ndarray (n_elec x n_elec x 3*n_nuc)
+        '''
+        n_elec = self._n_elec
+        
+        grad_mu_dot_field = np.zeros((n_elec, n_elec, self.n_nuclei*3))
+        if self._field_dir is not None:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for nuc in range(self.n_nuclei*3):
+                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], self._field_dir)
+                        
+        #   Or, we assume that the field is always in the same direction as the dipole moments 
+        else:
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    field = dipole_matrix[a, b]/np.linalg.norm(dipole_matrix[a, b])
+                    for nuc in range(self.n_nuclei*3):
+                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
+
+        return grad_mu_dot_field
+    
+    def _calc_grad_dipole_self_energy(self, mu_dot_field, grad_mu_dot_field):
+        '''
+            Parameters
+            ----------
+            mu_dot_field: np.ndarray (n_elec x n_elec)
+                Dipole matrix dotted with the electric field direction.
+                Computed in _calc_mu_dot_field() method.
+            grad_mu_dot_field: np.ndarray (n_elec x n_elec x 3*n_nuc)
+                Gradient of the dipole matrix dotted with the electric field direction.
+                Computed in _calc_grad_mu_dot_field() method.
+
+            Returns
+            -------
+            dipole_self_grad: np.ndarray (n_elec x n_elec, 3*n_nuc)
+        '''
+        n_elec = self._n_elec
+        dipole_self_grad = np.zeros((n_elec, n_elec, self.n_nuclei*3))
+        if self._use_DSE:
+            pre_factor = self.gc**2/self.omega_c
+            for a in range(n_elec):
+                for b in range(n_elec):
+                    for nuc in range(self.n_nuclei*3):
+                        for gamma in range(n_elec):
+                            term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
+                            term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
+                            dipole_self_grad[a, b, nuc] += term1 + term2
+        return dipole_self_grad
+
     def set_hamiltonian(self, energies, dipole_matrix):
+        '''
+            Evaluate the Hamiltonian elements. This must be done before
+            computing any kind of gradients or eigenvalues.
+
+            Parameters
+            ----------
+            energies: np.ndarray
+                diagonal components of the hamiltonian
+            dipole_matrix: np.ndarray (n_states x n_states)
+                Dipole matrix with diagonal elemnts being the dipoles of each
+                state and the off-diagonal elements being the transition dipoles
+        '''
         if not self._use_RWA:
             return self._set_hamiltonian_PF(energies, dipole_matrix)
         else:
@@ -324,29 +442,9 @@ class CoupledMolecule(AdiabaticStates):
                 state and the off-diagonal elements being the transition dipoles
         '''
         n_elec = self._n_elec
-        # for i in range(dipole_matrix.shape[0]):
-        #     for j in range(dipole_matrix.shape[1]):
-        #         print(f'{i=}, {j=}, {dipole_matrix[i,j]=}')
 
-        mu_dot_field = np.zeros((n_elec, n_elec))
-        if self._field_dir is not None:
-            norm_field_dir = self._field_dir / np.linalg.norm(self._field_dir)
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    mu_dot_field[a, b] = np.dot(dipole_matrix[a, b], self._field_dir)
-        else:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    mu_dot_field[a, b] = np.linalg.norm(dipole_matrix[a, b])
-                    
-        #   dipole self energy
-        dipole_self = np.zeros((n_elec, n_elec))
-        if self._use_DSE:
-            dipole_self = np.zeros((n_elec, n_elec))
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    for gamma in range(n_elec):
-                        dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
+        mu_dot_field = self._calc_mu_dot_field(dipole_matrix)
+        dipole_self = self._calc_dipole_self_energy(mu_dot_field)
 
         H_t = np.zeros((self._n_dim, self._n_dim))
         delta = np.eye(self._n_dim)
@@ -385,24 +483,8 @@ class CoupledMolecule(AdiabaticStates):
         '''
         n_elec = self._n_elec
 
-        mu_dot_field = np.zeros((n_elec, n_elec))
-        if self._field_dir is not None:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    mu_dot_field[a, b] = np.dot(dipole_matrix[a, b], self._field_dir)
-        else:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    mu_dot_field[a, b] = np.linalg.norm(dipole_matrix[a, b])
-
-        #   dipole self energy
-        dipole_self = np.zeros((n_elec, n_elec))
-        if self._use_DSE:
-            dipole_self = np.zeros((n_elec, n_elec))
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    for gamma in range(n_elec):
-                        dipole_self[a, b] += self.gc**2/self.omega_c * mu_dot_field[a, gamma]*mu_dot_field[gamma, b]
+        mu_dot_field = self._calc_mu_dot_field(dipole_matrix)
+        dipole_self = self._calc_dipole_self_energy(mu_dot_field)
         
         #   re-organize the states by "total" excitation
         # excitations = {}
@@ -458,51 +540,12 @@ class CoupledMolecule(AdiabaticStates):
             dipole_grads: (M_states, M_states, N_atoms*3, 3) array
         '''
 
-        # full_grads = np.zeros((self._n_elec, self.n_nuclei*3))
-        # for i, idx in enumerate(self.mol_grad_indices):
-        #     print('assigning grads: ', i, idx)
-        #     full_grads[idx] = gradients[i]
-
-        full_grads = np.copy(gradients)
-
-        n_elec = self._n_elec
-
-        mu_dot_field = np.zeros((n_elec, n_elec))
-        grad_mu_dot_field = np.zeros((n_elec, n_elec, self.n_nuclei*3))
-        dH = np.zeros((self._n_dim, self._n_dim, self.n_nuclei*3))
-
-        #   dipole dotted with electric field directions
-        if self._field_dir is not None:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    mu_dot_field[a, b] = np.dot(dipoles[a, b], self._field_dir)
-                    for nuc in range(self.n_nuclei*3):
-                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], self._field_dir)
-                        
-        #   Or, we assume that the field is always in the same direction as the dipole moments 
-        else:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    field = dipoles[a, b]/np.linalg.norm(dipoles[a, b])
-                    mu_dot_field[a, b] = np.linalg.norm(dipoles[a, b])
-                    for nuc in range(self.n_nuclei*3):
-                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
-                    
-        #   gradient of the dipole self energy
-        dipole_self_grad = np.zeros((n_elec, n_elec, self.n_nuclei*3))
-
-        if self._use_DSE:
-            pre_factor = self.gc**2/self.omega_c
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    for nuc in range(self.n_nuclei*3):
-                        for gamma in range(n_elec):
-                            term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
-                            term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
-                            dipole_self_grad[a, b, nuc] += term1 + term2
-
+        mu_dot_field = self._calc_mu_dot_field(dipoles)
+        grad_mu_dot_field = self._calc_grad_mu_dot_field(dipoles, dipole_grads)
+        dipole_self_grad = self._calc_grad_dipole_self_energy(mu_dot_field, grad_mu_dot_field)
 
         #   now form the gradient of the Hamiltonian matrix
+        dH = np.zeros((self._n_dim, self._n_dim, self.n_nuclei*3))
         delta = np.eye(self._n_dim)
         for i, state_i in enumerate(self.state_pairs):
             for j, state_j in enumerate(self.state_pairs):
@@ -510,7 +553,7 @@ class CoupledMolecule(AdiabaticStates):
                 b, n = state_j
 
                 for nuc in range(self.n_nuclei*3):
-                    dH_en = full_grads[a, nuc]*delta[a, b]*delta[m, n]
+                    dH_en = gradients[a, nuc]*delta[a, b]*delta[m, n]
                     dH_p = 0.0
                     dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
                     dH_en_p = self.gc * grad_mu_dot_field[a, b, nuc] * (sqrt(n)*delta[m, n-1] + sqrt(n+1)*delta[m, n+1])
@@ -537,46 +580,12 @@ class CoupledMolecule(AdiabaticStates):
         #     print('assigning grads: ', i, idx)
         #     full_grads[idx] = gradients[i]
 
-        full_grads = np.copy(gradients)
-
-        n_elec = self._n_elec
-
-        mu_dot_field = np.zeros((n_elec, n_elec))
-        grad_mu_dot_field = np.zeros((n_elec, n_elec, self.n_nuclei*3))
-        dH = np.zeros((self._n_dim, self._n_dim, self.n_nuclei*3))
-
-        #   dipole dotted with electric field directions
-        if self._field_dir is not None:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    mu_dot_field[a, b] = np.dot(dipoles[a, b], self._field_dir)
-                    for nuc in range(self.n_nuclei*3):
-                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], self._field_dir)
-                        
-        #   Or, we assume that the field is always in the same direction as the dipole moments 
-        else:
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    field = dipoles[a, b]/np.linalg.norm(dipoles[a, b])
-                    mu_dot_field[a, b] = np.linalg.norm(dipoles[a, b])
-                    for nuc in range(self.n_nuclei*3):
-                        grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
-                    
-        #   gradient of the dipole self energy
-        dipole_self_grad = np.zeros((n_elec, n_elec, self.n_nuclei*3))
-
-        if self._use_DSE:
-            pre_factor = self.gc**2/self.omega_c
-            for a in range(n_elec):
-                for b in range(n_elec):
-                    for nuc in range(self.n_nuclei*3):
-                        for gamma in range(n_elec):
-                            term1 = pre_factor * grad_mu_dot_field[a, gamma, nuc] * mu_dot_field[gamma, b]
-                            term2 = pre_factor * mu_dot_field[a, gamma] * grad_mu_dot_field[gamma, b, nuc]
-                            dipole_self_grad[a, b, nuc] += term1 + term2
-
+        mu_dot_field = self._calc_mu_dot_field(dipoles)
+        grad_mu_dot_field = self._calc_grad_mu_dot_field(dipoles, dipole_grads)
+        dipole_self_grad = self._calc_grad_dipole_self_energy(mu_dot_field, grad_mu_dot_field)
 
         #   now form the gradient of the Hamiltonian matrix
+        dH = np.zeros((self._n_dim, self._n_dim, self.n_nuclei*3))
         delta = np.eye(self._n_dim)
         for i, state_i in enumerate(self.state_pairs):
             for j, state_j in enumerate(self.state_pairs):
@@ -584,7 +593,7 @@ class CoupledMolecule(AdiabaticStates):
                 b, n = state_j
 
                 for nuc in range(self.n_nuclei*3):
-                    dH_en = full_grads[a, nuc]*delta[a, b]*delta[m, n]
+                    dH_en = gradients[a, nuc]*delta[a, b]*delta[m, n]
                     dH_p = 0.0
                     dH_d = dipole_self_grad[a, b, nuc]*delta[m, n]
 
