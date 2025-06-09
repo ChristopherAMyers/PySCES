@@ -4,10 +4,13 @@ from numpy import sqrt, abs
 from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
 from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch, TCRunnerOptions, format_combo_job_results
-from pysces.fileIO import LoggerData, H5File, h5py, TCJobsLogger
+from pysces.fileIO import LoggerData, H5File
 from pysces.subroutines import SignFlipper
 from qcelemental.models import Molecule
 from qcelemental.periodic_table import periodictable as pt
+
+from pysces.qcRunners.TeraChem import TCJobsLogger
+from pysces.h5file import h5py
 
 from . import NumDeriv as numD
 import pickle
@@ -73,15 +76,16 @@ class AdiabaticStates():
     def __init__(self, n_states, n_nuclei) -> None:
         self._n_states = n_states
         self._n_nuclei = n_nuclei
+        self._hamiltonian = np.zeros((n_states, n_states))
+        self._dH = np.zeros((n_states, n_states, n_nuclei*3))
+        self._diagonalized = False
+
         self.eigen_vals = np.zeros(n_states)
         self.eigen_vecs = np.zeros((n_states, n_states))
-        self._hamiltonian = np.zeros((n_states, n_states))
-
-        self._dH = np.zeros((n_states, n_states, n_nuclei*3))
         self.NACs = np.zeros((n_states, n_states, n_nuclei*3))
         self.eigen_val_gradients = np.zeros((n_states, n_nuclei*3))
         self.eigen_vec_gradients = np.zeros((n_states, n_states, n_nuclei*3))
-        self._diagonalized = False
+        
 
     @property
     def n_states(self): return self._n_states
@@ -206,6 +210,9 @@ class AdiabaticStates():
                 inverse_energies = 1/(E_j - E_i)
                 term1 = inverse_energies * np.einsum('m,mnk,n->k', C_i, self.dH, C_j)
                 term2 = np.einsum('m,mnk,n->k', C_i, basis_NACs, C_j)
+
+                print('MAX VALS: ', i, j, term1.max(), inverse_energies)
+                
                 # term1 = np.zeros_like(dH[i, j])
                 # term2 = np.zeros_like(dH[i, j])
                 # for k in range(term2.shape[0]):
@@ -257,13 +264,11 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None, rwa=False, dse=True) -> None:
-        # n_elec = s_high - s_low + 1
-        # if s_high < s_low:
-        #     raise ValueError('s_high must be greater than or equal to s_low')
+    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None, rwa=False, dse=True):
 
         self.mol_grad_indices = mol_grads
         n_elec = max(mol_grads) + 1
+        # n_elec = len(mol_grads)
 
         super().__init__(n_elec*2, n_nuc)
         self._field_dir = field_dir
@@ -293,6 +298,7 @@ class CoupledMolecule(AdiabaticStates):
         self.mol_dipole_matrix = np.zeros((self._n_elec, self._n_elec, 3))
         self.mol_dipole_matrix_gradient = np.zeros((self._n_elec, self._n_elec, self.n_nuclei*3, 3))
 
+
         #   internal components used to store the hamiltonian
         self._H_d = np.zeros_like(self._hamiltonian)
         self._H_en_p = np.zeros_like(self._hamiltonian)
@@ -301,7 +307,6 @@ class CoupledMolecule(AdiabaticStates):
         self._use_DSE = dse # dipole self energy
         self._use_RWA = rwa # use the rotating wave approximation
 
-    
     def copy(self):
         new_copy = deepcopy(self)
         return new_copy
@@ -791,13 +796,12 @@ class PolaritonLogger():
     name = 'polariton'
     def __init__(self) -> None:
         self._h5_file: H5File = None
-        self._h5_group: h5py.Group
+        self._h5_group: h5py.Group = None
         self._initialized = False
         self._next_dataset: dict[str, np.ndarray] = {}
         self._labels: dict[str,list[str]] = {}
 
-    def setup(self, logging_dir: str, h5_file: H5File):
-        self._logging_Dir = logging_dir
+    def setup(self, h5_file: H5File):
         self._h5_file = h5_file
         self._h5_group = h5_file.create_group(self.name)
         self._h5_group.create_dataset('time', shape=(0,), maxshape=(None,), chunks=True)
@@ -814,10 +818,10 @@ class PolaritonLogger():
     def set_next_dataset(self, data: dict):
         self._next_dataset = data
 
-    def write(self, logger_data: LoggerData):
+    def write(self, time: float):
         if not self._initialized:
             self._initialize()
-        H5File.append_dataset(self._h5_group['time'], logger_data.time)
+        H5File.append_dataset(self._h5_group['time'], time)
         for key, data in self._next_dataset.items():
             H5File.append_dataset(self._h5_group[key], data)
 
@@ -917,6 +921,9 @@ class TCPolaritonRunner(TCRunner):
     def serialize(self):
         out_data = {}
 
+    def set_logger_file(self, h5_file: H5File):
+        super().set_logger_file(h5_file)
+        self.polariton_logger.setup(h5_file)
 
     def save_state(self):
         pass
@@ -1210,10 +1217,8 @@ class TCPolaritonRunner(TCRunner):
         self._momentum_history.append((self._n_steps, momentum))
 
         #   step 1
-        dipoles = np.arange(0, max(self._grads) + 1, dtype=int).tolist()
-        tr_dipoles = [(0, x) for x in range(1, max(self._grads) + 1)] + self._NACs
+        dipoles, tr_dipoles = self._check_new_dipole_grads_to_run(None)
         job_batch = self.create_jobs(geom, False, self._grads, self._NACs, dipoles, tr_dipoles)
-        input('Continue?')
         job_batch = self._send_jobs_to_clients(job_batch)
 
         #   step 2
@@ -1230,15 +1235,23 @@ class TCPolaritonRunner(TCRunner):
         self.compute_coupled_mol_properties(job_batch.results_list)
         self.log_timestep()
         self.print_results()
-        self.set_pysces_outputs()
         self.save_state()
         self._finalize_frame(job_batch)
 
         return self.get_pysces_outputs()
         
     def _check_new_dipole_grads_to_run(self, job_batch: TCJobBatch):
+        min_dipole = 0
+        if self.coupled_mol._use_RWA and not self.coupled_mol._use_DSE:
+            dipoles = ()
+        else:
+            dipoles = np.arange(min(self._grads), max(self._grads) + 1, dtype=int).tolist()
+
+        # tr_dipoles = [(0, x) for x in range(1, max(self._grads) + 1)] + self._NACs
+        tr_dipoles = [(0, x) for x in range(1, max(self._grads) + 1)] 
+
         if not self._run_dipole_derivative_interpolation:
-            return (), ()
+            return dipoles, tr_dipoles
         else:
             raise NotImplementedError('Interpolation of dipole gradients not yet implemented')
 
@@ -1263,7 +1276,7 @@ class TCPolaritonRunner(TCRunner):
 
         self._prev_evecs = self.coupled_mol.eigen_vecs
 
-    def set_pysces_outputs(self):
+    def get_pysces_outputs(self):
         #   TODO: Compute transition dipoles!!!
         mol = self.coupled_mol
         if 0 not in self.coupled_mol.mol_grad_indices:
@@ -1275,15 +1288,20 @@ class TCPolaritonRunner(TCRunner):
             out_eigen_val_grads = mol.eigen_val_gradients
             out_NACs = mol.NACs
 
+        #   reduce the size of the arrays passed back to PySCES
+        start_idx = min(mol.mol_grad_indices)
+        out_eigen_vals = out_eigen_vals[start_idx:]
+        out_eigen_val_grads = out_eigen_val_grads[start_idx:]
+        out_NACs = out_NACs[start_idx:, start_idx:]
+        print('Original: ', mol.eigen_vals)
+        print('Reduced: ', out_eigen_vals)
+        input()
 
         if self._rk4_inteprolation:
             self._previous_pysces_outputs = None
             raise NotImplementedError('RK4 interpolation not yet implemented')
         else:
-            self._previous_pysces_outputs = (mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
-
-    def get_pysces_outputs(self):
-        return self._previous_pysces_outputs
+            return (mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
 
     def log_timestep(self):
         #   log all computed quantities
@@ -1298,6 +1316,7 @@ class TCPolaritonRunner(TCRunner):
         logged_data['dipole_matrix'] = mol.mol_dipole_matrix
         logged_data['dipole_matrix_grads'] = mol.mol_dipole_matrix_gradient
         self.polariton_logger.set_next_dataset(logged_data)
+        self.polariton_logger.write(self._frame_counter)
 
     def print_results(self):
         if self._print_level == 0:

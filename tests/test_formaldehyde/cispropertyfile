@@ -1,0 +1,24 @@
+gradient 1
+gradient 2
+gradient 3
+gradient 4
+coupling 1 2
+coupling 1 3
+coupling 1 4
+coupling 2 3
+coupling 2 4
+coupling 3 4
+dipolederiv 1
+dipolederiv 2
+dipolederiv 3
+dipolederiv 4
+transdipolederiv 0 1
+transdipolederiv 0 2
+transdipolederiv 0 3
+transdipolederiv 0 4
+transdipolederiv 1 2
+transdipolederiv 1 3
+transdipolederiv 1 4
+transdipolederiv 2 3
+transdipolederiv 2 4
+transdipolederiv 3 4

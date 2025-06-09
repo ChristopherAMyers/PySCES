@@ -7,10 +7,10 @@ import inspect
 import pysces
 import sys
 
-import pysces.h5file
 sys.path.insert(1, os.path.join(os.path.dirname(pysces.__file__), '../../tests'))
 from tools import parse_xyz_data, assert_dictionary, cleanup, reset_directory
 from pysces.qcRunners.TeraChem import TCJobBatch, TCJob
+import pysces.qcRunners.TeraChem as TC
 from pysces.h5file import H5File
 
 
@@ -34,7 +34,10 @@ class TEST_Formaldehyde(unittest.TestCase):
         this_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
         os.chdir(this_dir)
 
+        TC._DEBUG_LOAD_TRAJ = 'tc_traj_data.pkl'
         pysces.reset_settings()
+        pysces.options.input_local_settings()
+        pysces.options.make_logging_dir()
         pysces.run_simulation()
 
         data_tst = H5File('logs.h5')
@@ -79,6 +82,9 @@ class TEST_Formaldehyde(unittest.TestCase):
             restart_ref = json.load(file)
         with open('restart.json') as file:
             restart_tst = json.load(file)
+        for k in ['TCJobBatch__batch_counter', 'TCJob__job_counter']:
+            restart_ref.pop(k, None)
+            restart_tst.pop(k, None)
         assert_dictionary(self, restart_ref, restart_tst, atol=1e-3)
 
         cleanup()

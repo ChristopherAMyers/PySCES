@@ -20,9 +20,9 @@ restart_file_in = 'restart.json'
 
 #   TeraChem runner options
 # tcr_host = ['10.1.1.166']*2
-tcr_host = ['10.1.1.165']*2
-tcr_port = [12340, 12341]
-tcr_server_root = ['/home/cmyers7/scratch/single_servers/12340', '/home/cmyers7/scratch/single_servers/12341']
+tcr_host = ['10.1.1.157', '10.1.1.166'][0]
+tcr_port = [12341, 12341][0]
+tcr_server_root = ['/home/cmyers7/scratch/single_servers/tmp1', '/home/cmyers7/scratch/single_servers/tmp2'][0]
 # tcr_server_root = ['servers']*2
 tcr_job_options = {
         'method': 'b3lyp',
@@ -76,7 +76,7 @@ state_labels = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
 init_state = 4
 
 EV_2_AU = 1/27.2114079527
-coupled_mol = CoupledMolecule(9.56740788*EV_2_AU, 5, [1,2,3,4], 4, [0.5889,    -0.3378,    -0.0286])
+coupled_mol = CoupledMolecule(9.56740788*EV_2_AU, [1,2,3,4], 4, [0.5889,    -0.3378,    -0.0286])
 coupled_mol.set_gc_from_coupling(0.3*EV_2_AU, 0.6795)
 mol = Molecule.from_file('freq/mol.xyz')
 tc_runner_opts = TCRunnerOptions()
@@ -87,6 +87,6 @@ tc_runner_opts.state_options = {'grads': [1, 2, 3, 4]}
 tc_runner_opts.server_root = tcr_server_root
 tc_runner_opts.spec_job_opts = tcr_spec_job_opts
 QC_RUNNER = TCPolaritonRunner(coupled_mol, mol.symbols, tc_runner_opts)
-extra_loggers = [QC_RUNNER.polariton_logger, QC_RUNNER.tc_logger]
+# extra_loggers = [QC_RUNNER.polariton_logger, QC_RUNNER.tc_logger]
 mol_input_format = 'terachem'
 QC_RUNNER.set_print_level(0)
