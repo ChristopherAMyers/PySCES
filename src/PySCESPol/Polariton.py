@@ -21,6 +21,7 @@ from typing import Literal
 from time import time
 import json
 from collections import deque
+from collections.abc import Iterable, Sequence
 
 try:
     from tcparse import parse_from_list
@@ -73,18 +74,21 @@ def _expand_array(small_array: np.ndarray, target_shape: tuple, indices: list | 
     return new_array
 
 class AdiabaticStates():
-    def __init__(self, n_states, n_nuclei) -> None:
-        self._n_states = n_states
+    def __init__(self, n_states, n_nuclei, subset_indices: list[int, int] | None = None) -> None:
+        # N = n_states
+        N = len(subset_indices) if subset_indices is not None else n_states
+
+        self._n_states = N
         self._n_nuclei = n_nuclei
-        self._hamiltonian = np.zeros((n_states, n_states))
-        self._dH = np.zeros((n_states, n_states, n_nuclei*3))
+        self._hamiltonian = np.zeros((N, N))
+        self._dH = np.zeros((N, N, n_nuclei*3))
         self._diagonalized = False
 
-        self.eigen_vals = np.zeros(n_states)
-        self.eigen_vecs = np.zeros((n_states, n_states))
-        self.NACs = np.zeros((n_states, n_states, n_nuclei*3))
-        self.eigen_val_gradients = np.zeros((n_states, n_nuclei*3))
-        self.eigen_vec_gradients = np.zeros((n_states, n_states, n_nuclei*3))
+        self.eigen_vals = np.zeros(N)
+        self.eigen_vecs = np.zeros((N, N))
+        self.NACs = np.zeros((N, N, n_nuclei*3))
+        self.eigen_val_gradients = np.zeros((N, n_nuclei*3))
+        self.eigen_vec_gradients = np.zeros((N, N, n_nuclei*3))
         
 
     @property
@@ -99,15 +103,11 @@ class AdiabaticStates():
         
     @hamiltonian.setter
     def hamiltonian(self, matrix: np.ndarray):
+        self.zero()
         if matrix.shape != self._hamiltonian.shape:
             raise ValueError(f'Atempting to set Hamiltonian to a size of {matrix.shape} when it should be {self._hamiltonian.shape}')
         self._hamiltonian = matrix
         self._hamiltonian.flags['WRITEABLE'] = False
-
-        #   clear out the eigen arrays since they no longer belong to this Hamiltonian
-        for x in (self.eigen_vals, self.dH, self.NACs, self.eigen_val_gradients, self.eigen_vec_gradients):
-            x = np.zeros(x.shape)
-        self._diagonalized = False
 
     @property
     def dH(self):
@@ -119,6 +119,17 @@ class AdiabaticStates():
             raise ValueError(f'Atempting to set Hamiltonian gradient to a size of {matrix.shape} when it should be {self._dH.shape}')
         self._dH = matrix
         self._dH.flags['WRITEABLE'] = False
+
+    def zero(self):
+        '''
+            Set all properties of the AdiabaticStates object to zero.
+        '''
+        self._hamiltonian  = np.zeros_like(self._hamiltonian)
+        self._dH = np.zeros_like(self._dH)
+        self._diagonalized = False
+
+        for x in (self.eigen_vals, self.dH, self.NACs, self.eigen_val_gradients, self.eigen_vec_gradients):
+            x = np.zeros(x.shape)
 
     def diagonalize_H(self, ref_eig_vecs=None, swap_signs=False):
         e_vals, e_vecs = np.linalg.eigh(self._hamiltonian)
@@ -210,8 +221,7 @@ class AdiabaticStates():
                 inverse_energies = 1/(E_j - E_i)
                 term1 = inverse_energies * np.einsum('m,mnk,n->k', C_i, self.dH, C_j)
                 term2 = np.einsum('m,mnk,n->k', C_i, basis_NACs, C_j)
-
-                print('MAX VALS: ', i, j, term1.max(), inverse_energies)
+                # print('TERM 2: ', term2)
                 
                 # term1 = np.zeros_like(dH[i, j])
                 # term2 = np.zeros_like(dH[i, j])
@@ -264,13 +274,45 @@ class AdiabaticStates():
 
 class CoupledMolecule(AdiabaticStates):
 
-    def __init__(self, omega_c, mol_grads, n_nuc, field_dir=None, rwa=False, dse=True):
+    def __init__(self, 
+                 omega_c: float, 
+                 mol_grads: list[int], 
+                 n_nuc: int, 
+                 field_dir: list[float] | None = None, 
+                 subset_states: str | list[list[int, int]] | None = None,
+                 rwa: bool = False,
+                 dse: bool = True,
+                 pdt: bool = True,
+                 ):
+        '''
+            Create a molecule that is coupled to a polariton cavity
+
+            Parameters
+            ----------
+            omega_c : float
+                The cavity frequency in atomic units.
+            mol_grads : list[int]
+                Indices of molecular gradients to be included in the calculation.
+            n_nuc : int
+                The number of nuclei in the molecule.
+            field_dir : list[float] | None, optional
+                The direction of the electric field as a 3D vector. If None, the field direction is assumed to be aligned with each of transition dipoles for each Hamiltonian matrix element (Debug only).
+            subset_states : str | list[list[int, int]] | None, optional
+                Specifies a subset of states to include in the calculation. 
+                - If "all" or None, all states are included
+                - If "single", only the first excitation manifold of states is used. That is, the photon dressed molecular ground state + the first excited state of each molecule.
+                - Otherwise, a list of pairs of integers (a, n) where a is the index of the molecular state and n is the index of the polariton state.
+            rwa : bool, optional
+                Whether to use the Rotating Wave Approximation (RWA), which drops the counter-rotating terms as well as the permanent molecular dipoles. Default is False.
+            dse : bool, optional
+                Whether to include the Dipole Self-Energy (DSE) term. Default is True.
+        '''
 
         self.mol_grad_indices = mol_grads
         n_elec = max(mol_grads) + 1
         # n_elec = len(mol_grads)
 
-        super().__init__(n_elec*2, n_nuc)
+        # super().__init__(n_elec*2, n_nuc)
         self._field_dir = field_dir
         if self._field_dir is not None:
             self._field_dir = field_dir/np.linalg.norm(field_dir)
@@ -280,16 +322,18 @@ class CoupledMolecule(AdiabaticStates):
 
         n_pol = 2
         self._n_dim = n_pol * self._n_elec
-        self.matter_states = np.zeros(self._n_dim, dtype=int)
-        self.polariton_states = np.zeros(self._n_dim, dtype=int)
         self._state_pairs = np.zeros((self._n_dim, 2), dtype=int)
         for n in range(n_pol):
             for a in range(n_elec):
                 count = n*n_elec + a
-                self.state_pairs[count] = (a, n)
-                self.matter_states[count] = a
-                self.polariton_states[count] = n
+                self._state_pairs[count] = (a, n)
         self._state_pairs = tuple(tuple(p.tolist()) for p in self._state_pairs)
+        
+
+        self._subset_state_indices = self._calc_subset_indices(subset_states)
+        self._state_pairs = tuple(self._state_pairs[i] for i in self._subset_state_indices)
+        self._n_dim = len(self._state_pairs) # overwrites self._n_dim
+        super().__init__(n_elec*2, n_nuc, subset_indices=self._subset_state_indices)
 
         #   molecular properties
         self.mol_energies = np.zeros(self._n_elec)
@@ -306,6 +350,56 @@ class CoupledMolecule(AdiabaticStates):
         self._H_en = np.zeros_like(self._hamiltonian)
         self._use_DSE = dse # dipole self energy
         self._use_RWA = rwa # use the rotating wave approximation
+        self._use_PDT = pdt # use the permanent dipoles term in the Hamiltonian
+
+    def zero(self):
+        '''
+            Set all properties to zero.
+        '''
+        self._H_d *= 0
+        self._H_en_p *= 0
+        self._H_p *= 0
+        self._H_en *= 0
+
+        self.mol_energies *= 0
+        self.mol_gradients *= 0
+        self.mol_NACs *= 0
+        self.mol_dipole_matrix *= 0
+        self.mol_dipole_matrix_gradient *= 0
+  
+        super().zero()
+
+
+    def _calc_subset_indices(self, subset_states: str | list[list[int, int]] | None):
+        if subset_states == 'single':
+            #   only the first excitation manifold of states is used
+            #   that is, the photon dressed molecular ground state + the first excited state of each molecule
+            subset_states = [(a, 0) for a in range(1, self._n_elec)] + [(0, 1)]
+
+            indices = []
+            for i, pair in enumerate(self.state_pairs):
+                if pair in subset_states:
+                    indices.append(i)
+
+            if len(indices) == 0:
+                raise ValueError(f'No states found in the subset {subset_states} for the molecule with {self._n_elec} electronic states.')
+
+        elif subset_states == 'all' or subset_states is None:
+            indices = list(range(self._n_dim))
+
+
+        #   print the states we are using
+        print('Coupled Molecule state pairs:')
+        print('')
+        print('--------------------------------')
+        for idx, (a, n) in enumerate(self._state_pairs):
+            state = f'S{a},'
+            print(f'   {idx:<3d}: ( {state:3s} n={n:<2d} ) ' + '*'*(idx in indices))
+        print(' * Used for dynamics \n')
+  
+        return tuple(sorted(indices))
+                
+
 
     def copy(self):
         new_copy = deepcopy(self)
@@ -405,8 +499,6 @@ class CoupledMolecule(AdiabaticStates):
                 for b in range(n_elec):
                     field = dipole_matrix[a, b]/np.linalg.norm(dipole_matrix[a, b])
                     grad_mu_dot_field[a, b] = np.einsum('ij,j->i', dipole_grads[a, b], field)
-                    # for nuc in range(self.n_nuclei*3):
-                    #     grad_mu_dot_field[a, b, nuc] = np.dot(dipole_grads[a, b, nuc], field)
 
         return grad_mu_dot_field
     
@@ -471,6 +563,9 @@ class CoupledMolecule(AdiabaticStates):
 
         mu_dot_field = self._calc_mu_dot_field(dipole_matrix)
         dipole_self = self._calc_dipole_self_energy(mu_dot_field)
+        if not self._use_PDT:
+            for a in range(n_elec):
+                mu_dot_field[a, a] = 0.0
 
         H_t = np.zeros((self._n_dim, self._n_dim))
         delta = np.eye(self._n_dim)
@@ -511,17 +606,9 @@ class CoupledMolecule(AdiabaticStates):
 
         mu_dot_field = self._calc_mu_dot_field(dipole_matrix)
         dipole_self = self._calc_dipole_self_energy(mu_dot_field)
-        
-        #   re-organize the states by "total" excitation
-        # excitations = {}
-        # for a, n in self.state_pairs:
-        #     total = int((a > 0) + n)
-        #     if total not in excitations:
-        #         excitations[total] = []
-        #     excitations[total].append((a, n))
+
         
         H_t = np.zeros((self._n_dim, self._n_dim))
-        # for pair in excitations.values():
         delta = np.eye(self._n_dim)
         for i, state_i in enumerate(self.state_pairs):
             for j, state_j in enumerate(self.state_pairs):
@@ -531,12 +618,13 @@ class CoupledMolecule(AdiabaticStates):
                 H_en = energies[a]*delta[a, b]*delta[m, n]
                 H_p = self.omega_c*(n + 0/2)*delta[a, b]*delta[m, n]
                 H_d = dipole_self[a, b]*delta[m, n]
-                # print(H_d)
 
                 if a < b:
                     H_en_p = self.gc * mu_dot_field[a, b] * sqrt(n+1)*delta[m, n+1]
                 elif a > b:
                     H_en_p = self.gc * mu_dot_field[a, b] * sqrt(n)*delta[m, n-1]
+                elif a == b and self._use_PDT:
+                    H_en_p = self.gc * mu_dot_field[a, b] * (sqrt(n+1)*delta[m, n+1] + sqrt(n)*delta[m, n-1])
                 else:
                     H_en_p = 0.0
 
@@ -569,6 +657,11 @@ class CoupledMolecule(AdiabaticStates):
         mu_dot_field = self._calc_mu_dot_field(dipoles)
         grad_mu_dot_field = self._calc_grad_mu_dot_field(dipoles, dipole_grads)
         dipole_self_grad = self._calc_grad_dipole_self_energy(mu_dot_field, grad_mu_dot_field)
+
+        if not self._use_PDT:
+            for a in range(self._n_elec):
+                mu_dot_field[a, a] = 0.0
+                dipole_self_grad[a, a, :] = 0.0
 
         #   now form the gradient of the Hamiltonian matrix
         dH = np.zeros((self._n_dim, self._n_dim, self.n_nuclei*3))
@@ -619,6 +712,8 @@ class CoupledMolecule(AdiabaticStates):
                     dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * sqrt(n+1)*delta[m, n+1]
                 elif a > b:
                     dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * sqrt(n)*delta[m, n-1]
+                elif a == b and self._use_PDT:
+                    dH_en_p = self.gc * grad_mu_dot_field[a, b, :] * (sqrt(n+1)*delta[m, n+1] + sqrt(n)*delta[m, n-1])
                 else:
                     dH_en_p = 0.0
 
@@ -631,6 +726,13 @@ class CoupledMolecule(AdiabaticStates):
         self.mol_dipole_matrix_gradient = dipole_grads
         self.dH = dH
         return dH
+
+    def get_subset_properties(self):
+        out_eigen_vals = self.eigen_vals[self._subset_state_indices]
+        out_eigen_val_gradients = self.eigen_val_gradients[self._subset_state_indices][:, self._subset_state_indices]
+        out_NACs = self.NACs[self._subset_state_indices][:, self._subset_state_indices, :]
+
+        return (out_eigen_vals, out_eigen_val_gradients, out_NACs)
     
     def get_basis_overlaps(self, sub_basis_overlaps):
         overlaps = np.zeros((self._n_dim, self._n_dim))
@@ -1277,25 +1379,27 @@ class TCPolaritonRunner(TCRunner):
         self._prev_evecs = self.coupled_mol.eigen_vecs
 
     def get_pysces_outputs(self):
-        #   TODO: Compute transition dipoles!!!
+        # #   TODO: Compute transition dipoles!!!
         mol = self.coupled_mol
-        if 0 not in self.coupled_mol.mol_grad_indices:
-            out_eigen_vals = mol.eigen_vals[1:]
-            out_eigen_val_grads = mol.eigen_val_gradients[1:]
-            out_NACs = mol.NACs[1:, 1:]
-        else:
-            out_eigen_vals = mol.eigen_vals
-            out_eigen_val_grads = mol.eigen_val_gradients
-            out_NACs = mol.NACs
+        # if 0 not in self.coupled_mol.mol_grad_indices:
+        #     out_eigen_vals = mol.eigen_vals[1:]
+        #     out_eigen_val_grads = mol.eigen_val_gradients[1:]
+        #     out_NACs = mol.NACs[1:, 1:]
+        # else:
+        #     out_eigen_vals = mol.eigen_vals
+        #     out_eigen_val_grads = mol.eigen_val_gradients
+        #     out_NACs = mol.NACs
 
-        #   reduce the size of the arrays passed back to PySCES
-        start_idx = min(mol.mol_grad_indices)
-        out_eigen_vals = out_eigen_vals[start_idx:]
-        out_eigen_val_grads = out_eigen_val_grads[start_idx:]
-        out_NACs = out_NACs[start_idx:, start_idx:]
-        print('Original: ', mol.eigen_vals)
-        print('Reduced: ', out_eigen_vals)
+        # #   reduce the size of the arrays passed back to PySCES
+        # start_idx = min(mol.mol_grad_indices)
+        # out_eigen_vals = out_eigen_vals[start_idx:]
+        # out_eigen_val_grads = out_eigen_val_grads[start_idx:]
+        # out_NACs = out_NACs[start_idx:, start_idx:]
+        # print('Original: ', mol.eigen_vals)
+        # print('Reduced: ', out_eigen_vals)
         input()
+
+        out_eigen_vals, out_eigen_val_grads, out_NACs = self.coupled_mol.get_subset_properties()
 
         if self._rk4_inteprolation:
             self._previous_pysces_outputs = None
