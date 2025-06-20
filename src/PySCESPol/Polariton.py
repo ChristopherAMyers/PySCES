@@ -103,7 +103,7 @@ class AdiabaticStates():
         
     @hamiltonian.setter
     def hamiltonian(self, matrix: np.ndarray):
-        self.zero()
+        # self.zero()
         if matrix.shape != self._hamiltonian.shape:
             raise ValueError(f'Atempting to set Hamiltonian to a size of {matrix.shape} when it should be {self._hamiltonian.shape}')
         self._hamiltonian = matrix
@@ -221,13 +221,6 @@ class AdiabaticStates():
                 inverse_energies = 1/(E_j - E_i)
                 term1 = inverse_energies * np.einsum('m,mnk,n->k', C_i, self.dH, C_j)
                 term2 = np.einsum('m,mnk,n->k', C_i, basis_NACs, C_j)
-                # print('TERM 2: ', term2)
-                
-                # term1 = np.zeros_like(dH[i, j])
-                # term2 = np.zeros_like(dH[i, j])
-                # for k in range(term2.shape[0]):
-                #     term1[k] = -inverse_energies*C_i @ dH[:,:,k] @ C_j # THE CORRECT ONE!!!
-                #     term2[k] = C_i @ basis_NACs[:,:,k] @ C_j
 
                 couplings[i, j] = term1 + term2
 
@@ -352,22 +345,22 @@ class CoupledMolecule(AdiabaticStates):
         self._use_RWA = rwa # use the rotating wave approximation
         self._use_PDT = pdt # use the permanent dipoles term in the Hamiltonian
 
-    def zero(self):
-        '''
-            Set all properties to zero.
-        '''
-        self._H_d *= 0
-        self._H_en_p *= 0
-        self._H_p *= 0
-        self._H_en *= 0
+    # def zero(self):
+    #     '''
+    #         Set all properties to zero.
+    #     '''
+    #     self._H_d = np.zeros_like(self._H_d)
+    #     self._H_en_p = np.zeros_like(self._H_en_p)
+    #     self._H_p = np.zeros_like(self._H_p)
+    #     self._H_en = np.zeros_like(self._H_en)
 
-        self.mol_energies *= 0
-        self.mol_gradients *= 0
-        self.mol_NACs *= 0
-        self.mol_dipole_matrix *= 0
-        self.mol_dipole_matrix_gradient *= 0
-  
-        super().zero()
+    #     self.mol_energies = np.zeros_like(self.mol_energies)
+    #     self.mol_gradients = np.zeros_like(self.mol_gradients)
+    #     self.mol_NACs = np.zeros_like(self.mol_NACs)
+    #     self.mol_dipole_matrix = np.zeros_like(self.mol_dipole_matrix)
+    #     self.mol_dipole_matrix_gradient = np.zeros_like(self.mol_dipole_matrix_gradient)
+
+    #     super().zero()
 
 
     def _calc_subset_indices(self, subset_states: str | list[list[int, int]] | None):
@@ -406,11 +399,11 @@ class CoupledMolecule(AdiabaticStates):
         return new_copy
     
     def compute_all(self, all_energies, grads, nacs, dipole_matrix, dipole_matrix_grads, ref_eig_vecs=None):
-        self.mol_energies = all_energies
-        self.mol_gradients = grads
-        self.mol_NACs = nacs
-        self.mol_dipole_matrix_gradient = dipole_matrix_grads
-        self.mol_dipole_matrix = dipole_matrix
+        self.mol_energies = np.copy(all_energies)
+        self.mol_gradients = np.copy(grads)
+        self.mol_NACs = np.copy(nacs)
+        self.mol_dipole_matrix_gradient = np.copy(dipole_matrix_grads)
+        self.mol_dipole_matrix = np.copy(dipole_matrix)
 
         #   set hamiltonian, diagonalize, and compute needed gradients
         self.set_hamiltonian(all_energies, self.mol_dipole_matrix)
@@ -1563,6 +1556,7 @@ class TCPolaritonRunner(TCRunner):
         n_enrgies = len(ref_job.results['energy'])
         if n_enrgies != self.coupled_mol._n_elec:
             raise ValueError(f'Computed electronic structure states ({n_enrgies}) does not equal the Coupled Molecule electronic states ({self.coupled_mol._n_elec})')
+
 
         #   update all jobs
         # for num_deriv_job, overlap_job in zip(jobs['num_deriv_jobs'], jobs['overlap_jobs']):
