@@ -341,6 +341,8 @@ class CoupledMolecule(AdiabaticStates):
         self._H_en_p = np.zeros_like(self._hamiltonian)
         self._H_p = np.zeros_like(self._hamiltonian)
         self._H_en = np.zeros_like(self._hamiltonian)
+
+        #   turns on/off Hamiltonian approximations
         self._use_DSE = dse # dipole self energy
         self._use_RWA = rwa # use the rotating wave approximation
         self._use_PDT = pdt # use the permanent dipoles term in the Hamiltonian
@@ -1374,31 +1376,22 @@ class TCPolaritonRunner(TCRunner):
     def get_pysces_outputs(self):
         # #   TODO: Compute transition dipoles!!!
         mol = self.coupled_mol
-        # if 0 not in self.coupled_mol.mol_grad_indices:
-        #     out_eigen_vals = mol.eigen_vals[1:]
-        #     out_eigen_val_grads = mol.eigen_val_gradients[1:]
-        #     out_NACs = mol.NACs[1:, 1:]
-        # else:
-        #     out_eigen_vals = mol.eigen_vals
-        #     out_eigen_val_grads = mol.eigen_val_gradients
-        #     out_NACs = mol.NACs
 
-        # #   reduce the size of the arrays passed back to PySCES
-        # start_idx = min(mol.mol_grad_indices)
-        # out_eigen_vals = out_eigen_vals[start_idx:]
-        # out_eigen_val_grads = out_eigen_val_grads[start_idx:]
-        # out_NACs = out_NACs[start_idx:, start_idx:]
-        # print('Original: ', mol.eigen_vals)
-        # print('Reduced: ', out_eigen_vals)
-        input()
-
-        out_eigen_vals, out_eigen_val_grads, out_NACs = self.coupled_mol.get_subset_properties()
+        # out_eigen_vals, out_eigen_val_grads, out_NACs = self.coupled_mol.get_subset_properties()
+        
+        if (0, 0) in mol.state_pairs:
+            out_all_energies = mol.eigen_vals.copy()
+        else:
+            out_all_energies = np.append(np.min(mol.mol_energies), mol.eigen_vals)
+        out_eigen_vals = mol.eigen_vals
+        out_eigen_val_grads = mol.eigen_val_gradients
+        out_NACs = mol.NACs
 
         if self._rk4_inteprolation:
             self._previous_pysces_outputs = None
             raise NotImplementedError('RK4 interpolation not yet implemented')
         else:
-            return (mol.eigen_vals, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
+            return (out_all_energies, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
 
     def log_timestep(self):
         #   log all computed quantities
