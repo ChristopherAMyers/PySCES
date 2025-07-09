@@ -23,7 +23,6 @@ from collections import deque
 from collections.abc import Iterable, Sequence
 
 from . import NumDeriv as numD
-from .Serialization import CoupledMoleculeDeserialize, CoupledMoleculeSerialize
 from .Interpolation import DipoleMatrixTracker
 from .CoupledMolecule import CoupledMolecule
 
@@ -203,19 +202,13 @@ class TCPolaritonRunner(TCRunner):
             self.__dict__[attr] = value
     
     def save_restart(self):
-        # out_data = {}
-        # out_data['_prev_evecs'] = self._prev_evecs.tolist() if self._prev_evecs is not None else None
-        # return {'polariton': out_data}
-
-        pass
+        from .Serialization import TCPolaritonRunnerSerialize
+        restart_data = TCPolaritonRunnerSerialize(self)
+        return restart_data
 
     def load_restart(self, restart_data):
-        try:
-            self._prev_evecs = np.array(restart_data['_prev_evecs']) if restart_data['_prev_evecs'] is not None else None
-        except KeyError as e:
-            raise KeyError(f'Key {e} not found in restart data. Make sure the polariton runner is initialized correctly.') from e
-
-        
+        from .Serialization import TCPolaritonRunnerDeserialize
+        TCPolaritonRunnerDeserialize(restart_data, self)
 
     def set_logger_file(self, h5_file: H5File):
         super().set_logger_file(h5_file)
@@ -508,7 +501,7 @@ class TCPolaritonRunner(TCRunner):
         self._momentum_history.append((self._n_steps, momentum))
 
         #   step 1
-        dipoles, tr_dipoles = self._check_new_dipole_grads_to_run(None)
+        dipoles, tr_dipoles = self._check_new_dipole_grads_to_run()
         job_batch = self.create_jobs(geom, False, self._grads, self._NACs, dipoles, tr_dipoles)
         job_batch = self._send_jobs_to_clients(job_batch)
 
