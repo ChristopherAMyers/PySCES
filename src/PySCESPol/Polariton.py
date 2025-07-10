@@ -145,6 +145,8 @@ class TCPolaritonRunner(TCRunner):
         self._rk4_inteprolation = False
         self._interpolation = False
 
+        self._set_mol_nacs_to_compute()
+
         #   load the previous state of the runner if it exists
         if os.path.isfile('_polariton_runner.pkl') and False:
             print('DEBUG: LOADING IN PREVIOUS POLARITON RUNNER STATE')
@@ -200,6 +202,26 @@ class TCPolaritonRunner(TCRunner):
         '''
         for attr, value in state.items():
             self.__dict__[attr] = value
+
+    def _set_mol_nacs_to_compute(self):
+        nac_pairs = []
+        for (a, m) in self.coupled_mol._state_pairs:
+            for (b, n) in self.coupled_mol._state_pairs:
+                if a >= b:
+                    continue
+                if m != n:
+                    continue
+                nac_pairs.append((a, b))
+        self._NACs = tuple(nac_pairs)
+
+        print('\nCoupled Molecule NAC pairs to compute:')
+        print('')
+        print('--------------------------------')
+        for idx, (a, b) in enumerate(nac_pairs):
+            state_a = f'S{a}'
+            state_b = f'S{b}'
+            print(f'   ⟨{state_a}|∇|{state_b}⟩')
+        print()
     
     def save_restart(self):
         from .Serialization import TCPolaritonRunnerSerialize

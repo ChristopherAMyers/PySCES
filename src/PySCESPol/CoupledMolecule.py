@@ -53,8 +53,7 @@ class CoupledMolecule(AdiabaticStates):
         self._n_elec = n_elec
 
         n_pol = 2
-        self._n_dim = n_pol * self._n_elec
-        self._state_pairs = np.zeros((self._n_dim, 2), dtype=int)
+        self._state_pairs = np.zeros((n_pol * self._n_elec, 2), dtype=int)
         for n in range(n_pol):
             for a in range(n_elec):
                 count = n*n_elec + a
@@ -63,9 +62,10 @@ class CoupledMolecule(AdiabaticStates):
         
 
         self._subset_state_indices = self._calc_subset_indices(subset_states)
+        #   override the state pairs to only include the subset of states
         self._state_pairs = tuple(self._state_pairs[i] for i in self._subset_state_indices)
-        self._n_dim = len(self._state_pairs) # overwrites self._n_dim
-        super().__init__(n_elec*2, n_nuc, subset_indices=self._subset_state_indices)
+        self._n_dim = len(self._state_pairs) 
+        super().__init__(self._n_dim, n_nuc)
 
         #   molecular properties
         self.mol_energies = np.zeros(self._n_elec)
@@ -107,7 +107,7 @@ class CoupledMolecule(AdiabaticStates):
 
 
         #   print the states we are using
-        print('Coupled Molecule state pairs:')
+        print('\nCoupled Molecule state pairs:')
         print('')
         print('--------------------------------')
         for idx, (a, n) in enumerate(self._state_pairs):
@@ -116,8 +116,7 @@ class CoupledMolecule(AdiabaticStates):
         print(' * Used for dynamics \n')
   
         return tuple(sorted(indices))
-                
-
+    
 
     def copy(self):
         new_copy = deepcopy(self)

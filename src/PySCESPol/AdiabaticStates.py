@@ -3,9 +3,8 @@ import numpy as np
 from . import NumDeriv as numD
 
 class AdiabaticStates():
-    def __init__(self, n_states, n_nuclei, subset_indices: list[int, int] | None = None) -> None:
-        # N = n_states
-        N = len(subset_indices) if subset_indices is not None else n_states
+    def __init__(self, n_states, n_nuclei) -> None:
+        N = n_states
 
         self._n_states = N
         self._n_nuclei = n_nuclei
