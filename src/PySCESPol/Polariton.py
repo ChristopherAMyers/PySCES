@@ -11,6 +11,7 @@ from qcelemental.periodic_table import periodictable as pt
 
 from pysces.qcRunners.TeraChem import TCJobsLogger
 from pysces.h5file import h5py
+from pysces.common import ESVarsHistory, ESVars
 
 import pickle
 import os
@@ -130,6 +131,7 @@ class TCPolaritonRunner(TCRunner):
         self._momentum_history = deque(maxlen=50)
         self._position_history = deque(maxlen=50)
         self._dipole_matrix_history = deque(maxlen=50)
+        self._es_vars_history = ESVarsHistory(maxlen=50)
 
         self._run_dipole_derivative_interpolation = False
         self._ran_actual_dipoles = False
@@ -510,8 +512,10 @@ class TCPolaritonRunner(TCRunner):
 
     def run_new_geom(self, phase_vars: 'PhaseVars' = None, geom=None, momentum=None):
 
+        time = None
         if phase_vars is not None:
             geom = phase_vars.nuc_q*BOHR_2_ANG
+            time = phase_vars.time
         elif geom is not None:
             #   legacy support for geom, assumed to be in angstroms
             pass
@@ -538,12 +542,15 @@ class TCPolaritonRunner(TCRunner):
             job_batch.jobs += job_batch_2.jobs
 
         self._log_jobs(job_batch, self._frame_counter)
-        self.compute_coupled_mol_properties(job_batch.results_list)
+        self.compute_coupled_mol_properties(time, job_batch.results_list)
         self.log_timestep()
         self.print_results()
         self._finalize_frame(job_batch)
 
-        return self.get_pysces_outputs()
+        # out_val = self._es_vars_history[-1]
+        # out_val.eval_func = self.compute_substep
+        # return out_val
+        return self.get_pysces_outputs(time)
         
     def _check_new_dipole_grads_to_run(self):
         if self.coupled_mol._use_RWA and not self.coupled_mol._use_DSE:
@@ -567,7 +574,7 @@ class TCPolaritonRunner(TCRunner):
 
         self._initialize_nac_sign(nacs)
 
-    def compute_coupled_mol_properties(self, results_list: list[dict]):
+    def compute_coupled_mol_properties(self, time: float, results_list: list[dict]):
         all_states = np.arange(0, max(self._grads) + 1)
         all_energies, elecE, grads, nacs, dipole_matrix, dipole_matrix_grads = format_combo_job_results(results_list, all_states)
 
@@ -577,9 +584,30 @@ class TCPolaritonRunner(TCRunner):
         #   update the dipole matrixcompute all polariton properties
         self.coupled_mol.compute_all(all_energies, grads, nacs, dipole_matrix, dipole_matrix_grads, self._prev_evecs)
 
+        #   update history
+        es_vars = ESVars(time, all_energies, elecE, grads, nacs, dipole_matrix, dipole_matrix_grads)
+        self._es_vars_history.append(es_vars)
+
         self._prev_evecs = self.coupled_mol.eigen_vecs
 
-    def get_pysces_outputs(self):
+
+    def compute_substep(self, t, y_vars=None):
+        
+        all_energies = self._es_vars_history.all_energies(t)
+        elecE = self._es_vars_history.elecE(t)
+        grads = self._es_vars_history.grads(t)
+        nacs = self._es_vars_history.nacs(t)
+        dipole_matrix = self._es_vars_history.dipole_matrix(t)
+        dipole_matrix_grads = self._es_vars_history.dipole_matrix_grads(t)
+
+        #   compute the coupled molecule properties
+        self.coupled_mol.compute_all(all_energies, grads, nacs, dipole_matrix, dipole_matrix_grads, self._prev_evecs)
+        self._prev_evecs = self.coupled_mol.eigen_vecs
+
+        return self.coupled_mol.eigen_vals, self.coupled_mol.eigen_val_gradients, self.coupled_mol.NACs
+
+
+    def get_pysces_outputs(self, time: float):
         # #   TODO: Compute transition dipoles!!!
         mol = self.coupled_mol
 
@@ -593,11 +621,15 @@ class TCPolaritonRunner(TCRunner):
         out_eigen_val_grads = mol.eigen_val_gradients
         out_NACs = mol.NACs
 
-        if self._rk4_inteprolation:
-            self._previous_pysces_outputs = None
-            raise NotImplementedError('RK4 interpolation not yet implemented')
-        else:
-            return (out_all_energies, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
+        es_vars_out = ESVars(time, out_all_energies, out_eigen_vals, out_eigen_val_grads, out_NACs)
+        es_vars_out.eval_func = self.compute_substep
+        return es_vars_out
+
+        # if self._rk4_inteprolation:
+        #     self._previous_pysces_outputs = None
+        #     raise NotImplementedError('RK4 interpolation not yet implemented')
+        # else:
+        #     return (out_all_energies, out_eigen_vals, out_eigen_val_grads, out_NACs, None, None)
 
     def log_timestep(self):
         #   log all computed quantities

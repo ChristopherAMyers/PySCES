@@ -59,7 +59,7 @@ class CoupledMolecule(AdiabaticStates):
                 count = n*n_elec + a
                 self._state_pairs[count] = (a, n)
         self._state_pairs = tuple(tuple(p.tolist()) for p in self._state_pairs)
-        
+        self._n_dim = len(self._state_pairs)
 
         self._subset_state_indices = self._calc_subset_indices(subset_states)
         #   override the state pairs to only include the subset of states
@@ -135,7 +135,7 @@ class CoupledMolecule(AdiabaticStates):
         self.diagonalize_H(ref_eig_vecs)
         self.calc_NA_coupling(self.mol_NACs)
         self.calc_eigen_value_gradient()
-        self.calc_eigen_vector_gradient()
+        # self.calc_eigen_vector_gradient()
         # self._calc_eigen_vector_gradient_reference()
 
 
@@ -284,6 +284,8 @@ class CoupledMolecule(AdiabaticStates):
             for a in range(n_elec):
                 mu_dot_field[a, a] = 0.0
 
+        print('Creating PF-Hamiltonian matrix')
+        print(f'{self.gc=:.18f} {self.omega_c=:.18f}')
         H_t = np.zeros((self._n_dim, self._n_dim))
         delta = np.eye(self._n_dim)
         for i, state_i in enumerate(self.state_pairs):
@@ -301,6 +303,8 @@ class CoupledMolecule(AdiabaticStates):
                 self._H_p[i, j] = H_p
                 self._H_en_p[i, j] = H_en_p
                 self._H_d[i, j] = H_d
+
+                print(f'  {i=:2d} {j=:2d} {H_en=:23.18f} {H_p=:23.18f} {H_en_p=:23.18f} {H_d=:23.18f} {mu_dot_field[a, b]=:23.18f}')
 
         self.mol_energies = energies
         self.mol_dipole_matrix = dipole_matrix
