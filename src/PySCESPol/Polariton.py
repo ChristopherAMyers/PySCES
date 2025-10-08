@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pysces.qcRunners import TeraChem
 from pysces.qcRunners.TeraChem import TCRunner, TCJob, TCJobBatch, TCRunnerOptions, format_combo_job_results
 from pysces.fileIO import LoggerData, H5File
-from pysces.subroutines import SignFlipper
+from pysces.interpolation import SignFlipper
 from qcelemental.models import Molecule
 from qcelemental.periodic_table import periodictable as pt
 
@@ -77,6 +77,7 @@ def _expand_array(small_array: np.ndarray, target_shape: tuple, indices: list | 
     
     return new_array
 
+
 class PolaritonLogger():
     name = 'polariton'
     def __init__(self) -> None:
@@ -86,10 +87,27 @@ class PolaritonLogger():
         self._next_dataset: dict[str, np.ndarray] = {}
         self._labels: dict[str,list[str]] = {}
 
-    def setup(self, h5_file: H5File):
+    def setup(self, h5_file: H5File, coupled_mol: CoupledMolecule):
         self._h5_file = h5_file
         self._h5_group = h5_file.create_group(self.name)
         self._h5_group.create_dataset('time', shape=(0,), maxshape=(None,), chunks=True)
+        
+        #   save coupled molecule properties
+        cmg = self._h5_group.create_group('coupled_molecule')
+        cmg.attrs.create('n_states',                data=coupled_mol.n_states,              dtype=int)
+        cmg.attrs.create('n_nuclei',                data=coupled_mol.n_nuclei,              dtype=int)
+        cmg.attrs.create('n_elec',                  data=coupled_mol._n_elec,               dtype=int)
+        cmg.attrs.create('n_dim',                   data=coupled_mol._n_dim,                dtype=int)
+        cmg.attrs.create('omega_c',                 data=coupled_mol.omega_c,               dtype=float)
+        cmg.attrs.create('gc',                      data=coupled_mol.gc,                    dtype=float)
+        cmg.attrs.create('use_RWA',                 data=coupled_mol._use_RWA,              dtype=bool)
+        cmg.attrs.create('use_DSE',                 data=coupled_mol._use_DSE,              dtype=bool)
+        cmg.attrs.create('use_PDT',                 data=coupled_mol._use_PDT,              dtype=bool)
+        cmg.create_dataset('mol_grad_indices',      data=coupled_mol.mol_grad_indices,      dtype=int)
+        cmg.create_dataset('state_pairs',           data=coupled_mol._state_pairs,          dtype=int)
+        cmg.create_dataset('subset_state_indices',  data=coupled_mol._subset_state_indices, dtype=int)
+        cmg.create_dataset('field_dir',             data=coupled_mol._field_dir,            dtype=float)
+
 
     def _initialize(self):
         for key, data in self._next_dataset.items():
@@ -236,7 +254,8 @@ class TCPolaritonRunner(TCRunner):
 
     def set_logger_file(self, h5_file: H5File):
         super().set_logger_file(h5_file)
-        self.polariton_logger.setup(h5_file)
+        print('IN POLARITON SET LOGGER FILE')
+        self.polariton_logger.setup(h5_file, self.coupled_mol)
 
 
     def set_print_level(self, level):
