@@ -1,0 +1,23 @@
+debug/
+__pycache__
+.vscode
+#examples/
+*.egg-info
+*test_
+
+#   examples
+examples/*/logs*
+examples/*/cas.*
+examples/*/progress.out
+examples/*/__pycache__
+examples/*/restart.*
+
+tests/host_ports.txt
+tests/derivatives_cas/test_num_coupling.orig.py
+tests/derivatives_cas/tmp
+tests/derivatives_cis/test_num_coupling.orig.py
+tests/derivatives_cis/tmp
+tests/*/logs*
+
+debug/
+tests/derivatives_cis_2/debug_traj.pkl
